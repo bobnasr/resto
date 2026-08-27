@@ -47,6 +47,70 @@ def force_db_update():
     conn = sqlite3.connect(chemin_db, timeout=20)
     cursor = conn.cursor()
 
+    # --- CRÉATION DE TOUTES LES TABLES DE BASE ---
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS Commandes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type_commande TEXT,
+            table_id INTEGER,
+            statut TEXT,
+            total REAL,
+            date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )"""
+    )
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS Categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nom TEXT NOT NULL
+        )"""
+    )
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS Depots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nom TEXT NOT NULL
+        )"""
+    )
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS Produits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nom TEXT NOT NULL,
+            prix REAL NOT NULL,
+            categorie_id INTEGER
+        )"""
+    )
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS Salles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nom TEXT NOT NULL
+        )"""
+    )
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS Tables_Resto (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            numero_table TEXT NOT NULL,
+            capacite INTEGER,
+            statut TEXT DEFAULT 'Libre',
+            salle_id INTEGER
+        )"""
+    )
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS Stock_Plats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            produit_id INTEGER,
+            depot_id INTEGER,
+            quantite REAL DEFAULT 0
+        )"""
+    )
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS Mouvements_Stock (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            produit_id INTEGER,
+            depot_id INTEGER,
+            type_mouvement TEXT,
+            quantite REAL,
+            date_mvt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )"""
+    )
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS Lignes_Commande (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,6 +169,7 @@ def force_db_update():
         )"""
     )
 
+    # --- DONNÉES PAR DÉFAUT ---
     cursor.execute("SELECT count(*) FROM Utilisateurs")
     if cursor.fetchone()[0] == 0:
         cursor.execute(
@@ -126,6 +191,7 @@ def force_db_update():
         if cursor.fetchone()[0] == 0:
             cursor.execute("INSERT INTO Methodes_Paiement (nom) VALUES ('Note de Chambre')")
 
+    # --- MISES À JOUR DES TABLES (ALTER) ---
     cursor.execute("PRAGMA table_info(Parametres_Restaurant)")
     colonnes_param = [col[1] for col in cursor.fetchall()]
     if "heure_fin_service" not in colonnes_param:
@@ -228,6 +294,25 @@ def get_connection():
     return sqlite3.connect(os.path.join(dossier_actuel, "restaurant.db"), timeout=20)
 
 
+def imprimer_ticket_windows(texte_ticket, nom_fichier_export="ticket_print.txt", sous_dossier=None):
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        if sous_dossier:
+            target_dir = os.path.join(base_dir, sous_dossier)
+            os.makedirs(target_dir, exist_ok=True)
+        else:
+            target_dir = base_dir
+            
+        chemin_fichier = os.path.join(target_dir, nom_fichier_export)
+        with open(chemin_fichier, "w", encoding="utf-8-sig") as f:
+            f.write(texte_ticket)
+        if os.name == "nt":
+            os.startfile(chemin_fichier, "print")
+            return True
+    except Exception:
+        return False
+    return False
+
 def sauvegarder_ticket_local(texte_ticket, nom_fichier_export="ticket_print.txt", sous_dossier=None):
     """Sauvegarde le ticket localement sans déclencher l'impression Windows pour compatibilité Cloud"""
     try:
@@ -244,7 +329,6 @@ def sauvegarder_ticket_local(texte_ticket, nom_fichier_export="ticket_print.txt"
         return True
     except Exception:
         return False
-
 
 # --- FONCTION D'EXPORT VERS EXCEL (CSV) ---
 @st.cache_data
@@ -2272,9 +2356,7 @@ elif menu == "Prise de Commande":
                     df_paiement = pd.read_sql_query(
                         "SELECT nom FROM Methodes_Paiement ORDER BY nom", conn
                     )
-                    options_paiement = ["-- Sélectionner --", "À Crédit"] + df_paiement[
-                        "nom"
-                    ].tolist()
+                    options_paiement = ["-- Sélectionner --"] + df_paiement["nom"].tolist()
                     
                     idx_paiement = 0
                     if type_cmd == "Room Service":
