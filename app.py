@@ -1879,175 +1879,26 @@ elif menu == "Prise de Commande":
                         choix_c = st.selectbox(
                             "Sélectionnez une chambre :",
                             options=list(dict_chm.keys()),
-                            index=idx_chm,
-                            disabled=panier_actif
+                            index=idx_chm if st.session_state.chambre_active else None,
+                            disabled=panier_actif,
+                            placeholder="Choisir une chambre..."
                         )
-                        chambre_selectionnee_id = int(dict_chm[choix_c])
-                        st.session_state.chambre_active = chambre_selectionnee_id
-
-                        cursor.execute(
-                            "SELECT id FROM Commandes WHERE chambre_id = ? AND statut = 'En attente'",
-                            (chambre_selectionnee_id,),
-                        )
-                        cmd_existante = cursor.fetchone()
-                        if cmd_existante:
-                            st.warning(f"⚠️ Ticket en attente (#{cmd_existante[0]}).")
-                            if st.button("🔄 Charger le ticket"):
-                                st.session_state.commande_id_en_cours = cmd_existante[0]
-                                
-                                cursor.execute("SELECT client_id FROM Commandes WHERE id = ?", (cmd_existante[0],))
-                                c_id_res = cursor.fetchone()
-                                if c_id_res and c_id_res[0]:
-                                    c_id = c_id_res[0]
-                                    label_found = "Passager (Anonyme)"
-                                    for lbl, db_id in dict_clients.items():
-                                        if db_id == c_id:
-                                            label_found = lbl
-                                            break
-                                    st.session_state.active_client_name = label_found
-                                else:
-                                    st.session_state.active_client_name = "Passager (Anonyme)"
-
-                                df_lignes = pd.read_sql_query(
-                                    "SELECT lc.produit_id as id, p.nom, p.prix as prix_base, lc.prix_unitaire as prix, lc.quantite as qte, lc.quantite_envoyee, lc.quantite_offert_envoyee, lc.quantite_retour_envoyee FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id WHERE lc.commande_id = ?",
-                                    conn,
-                                    params=(cmd_existante[0],),
-                                )
-                                st.session_state.panier = {}
-                                for _, row in df_lignes.iterrows():
-                                    p_id = int(row["id"])
-                                    qte = int(row["qte"])
-                                    prix_ligne = float(row["prix"])
-                                    prix_b = float(row["prix_base"])
-                                    
-                                    qte_env = int(row["quantite_envoyee"]) if not pd.isna(row.get("quantite_envoyee")) else 0
-                                    qte_off_env = int(row["quantite_offert_envoyee"]) if not pd.isna(row.get("quantite_offert_envoyee")) else 0
-                                    qte_ret_env = int(row["quantite_retour_envoyee"]) if not pd.isna(row.get("quantite_retour_envoyee")) else 0
-
-                                    if p_id not in st.session_state.panier:
-                                        st.session_state.panier[p_id] = {
-                                            "nom": row["nom"],
-                                            "prix_base": prix_b,
-                                            "qte": 0,
-                                            "qte_retour": 0,
-                                            "qte_offert": 0,
-                                            "qte_envoyee": 0,             
-                                            "qte_offert_envoyee": 0,      
-                                            "qte_retour_envoyee": 0       
-                                        }
-                                    if qte > 0:
-                                        if prix_ligne == 0:
-                                            st.session_state.panier[p_id]["qte_offert"] += qte
-                                            st.session_state.panier[p_id]["qte_offert_envoyee"] += qte_off_env
-                                        else:
-                                            st.session_state.panier[p_id]["qte"] += qte
-                                            st.session_state.panier[p_id]["qte_envoyee"] += qte_env
-                                    elif qte < 0:
-                                        st.session_state.panier[p_id]["qte_retour"] += abs(qte)
-                                        st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
-                                st.rerun()
+                        if choix_c:
+                            chambre_selectionnee_id = int(dict_chm[choix_c])
+                            st.session_state.chambre_active = chambre_selectionnee_id
                         else:
-                            st.session_state.commande_id_en_cours = None
-                    else:
-                        st.warning("Aucune chambre configurée.")
+                            chambre_selectionnee_id = None
 
-                if type_cmd == "Sur Place":
-                    df_salles = pd.read_sql_query("SELECT id, nom FROM Salles ORDER BY nom", conn)
-                    if not df_salles.empty:
-                        dict_salles = dict(zip(df_salles["nom"], df_salles["id"]))
-                        
-                        idx_salle = 0
-                        idx_table = 0
-                        active_salle_id = None
-                        
-                        if st.session_state.table_active:
-                            cursor.execute("SELECT salle_id FROM Tables_Resto WHERE id = ?", (st.session_state.table_active,))
-                            res_salle = cursor.fetchone()
-                            if res_salle:
-                                active_salle_id = res_salle[0]
-                                for i, (nom_s, id_s) in enumerate(dict_salles.items()):
-                                    if id_s == active_salle_id:
-                                        idx_salle = i
-                                        break
-
-                        col_zs, col_zt = st.columns(2)
-                        
-                        choix_salle = col_zs.selectbox(
-                            "Sélectionnez une zone :",
-                            options=list(dict_salles.keys()),
-                            index=idx_salle,
-                            disabled=panier_actif
-                        )
-                        salle_selected_id = dict_salles[choix_salle]
-
-                        df_tables = pd.read_sql_query(
-                            "SELECT id, numero_table, statut FROM Tables_Resto WHERE salle_id = ? ORDER BY numero_table",
-                            conn, params=(salle_selected_id,)
-                        )
-                        if not df_tables.empty:
-                            df_tables["label"] = df_tables["numero_table"] + " (" + df_tables["statut"] + ")"
-                            dict_tables_resto = dict(zip(df_tables["label"], df_tables["id"]))
-
-                            if st.session_state.table_active and active_salle_id == salle_selected_id:
-                                for i, (label_t, id_t) in enumerate(dict_tables_resto.items()):
-                                    if id_t == st.session_state.table_active:
-                                        idx_table = i
-                                        break
-
-                            choix_t = col_zt.selectbox(
-                                "Sélectionnez une table :",
-                                options=list(dict_tables_resto.keys()),
-                                index=idx_table,
-                                disabled=panier_actif
-                            )
-                            table_selectionnee_id = int(dict_tables_resto[choix_t])
-                            st.session_state.table_active = table_selectionnee_id
-                            
-                            # --- TRANSFERT DE TABLE ---
-                            if st.session_state.commande_id_en_cours and panier_actif:
-                                st.markdown("<div style='margin-top: 5px;'></div>", unsafe_allow_html=True)
-                                with st.expander("🔄 Transférer ce ticket vers une autre table"):
-                                    df_salles_dest = pd.read_sql_query("SELECT id, nom FROM Salles ORDER BY nom", conn)
-                                    if not df_salles_dest.empty:
-                                        salles_dest_dict = dict(zip(df_salles_dest["nom"], df_salles_dest["id"]))
-                                        choix_salle_dest = st.selectbox("Zone de destination :", options=list(salles_dest_dict.keys()), key="dest_salle")
-                                        
-                                        df_tables_dest = pd.read_sql_query(
-                                            "SELECT id, numero_table FROM Tables_Resto WHERE salle_id = ? AND statut = 'Libre' ORDER BY numero_table",
-                                            conn, params=(salles_dest_dict[choix_salle_dest],)
-                                        )
-                                        if not df_tables_dest.empty:
-                                            tables_dest_dict = dict(zip(df_tables_dest["numero_table"], df_tables_dest["id"]))
-                                            choix_table_dest = st.selectbox("Table de destination :", options=list(tables_dest_dict.keys()), key="dest_table")
-                                            
-                                            if st.button("Valider le transfert", type="primary"):
-                                                nouvelle_table_id = tables_dest_dict[choix_table_dest]
-                                                ancienne_table_id = st.session_state.table_active
-                                                cmd_id = st.session_state.commande_id_en_cours
-                                                
-                                                cursor_t = conn.cursor()
-                                                cursor_t.execute("UPDATE Tables_Resto SET statut = 'Libre', demande_addition = 0 WHERE id = ?", (ancienne_table_id,))
-                                                cursor_t.execute("UPDATE Tables_Resto SET statut = 'Occupée' WHERE id = ?", (nouvelle_table_id,))
-                                                cursor_t.execute("UPDATE Commandes SET table_id = ? WHERE id = ?", (nouvelle_table_id, cmd_id))
-                                                conn.commit()
-                                                
-                                                st.session_state.table_active = nouvelle_table_id
-                                                st.success(f"Ticket transféré vers {choix_table_dest} !")
-                                                st.rerun()
-                                        else:
-                                            st.info(f"Aucune table libre dans la zone {choix_salle_dest}.")
-
+                        if chambre_selectionnee_id:
                             cursor.execute(
-                                "SELECT id FROM Commandes WHERE table_id = ? AND statut = 'En attente'",
-                                (table_selectionnee_id,),
+                                "SELECT id FROM Commandes WHERE chambre_id = ? AND statut = 'En attente'",
+                                (chambre_selectionnee_id,),
                             )
                             cmd_existante = cursor.fetchone()
                             if cmd_existante:
                                 st.warning(f"⚠️ Ticket en attente (#{cmd_existante[0]}).")
                                 if st.button("🔄 Charger le ticket"):
-                                    st.session_state.commande_id_en_cours = (
-                                        cmd_existante[0]
-                                    )
+                                    st.session_state.commande_id_en_cours = cmd_existante[0]
                                     
                                     cursor.execute("SELECT client_id FROM Commandes WHERE id = ?", (cmd_existante[0],))
                                     c_id_res = cursor.fetchone()
@@ -2102,6 +1953,165 @@ elif menu == "Prise de Commande":
                                     st.rerun()
                             else:
                                 st.session_state.commande_id_en_cours = None
+                    else:
+                        st.warning("Aucune chambre configurée.")
+
+                if type_cmd == "Sur Place":
+                    df_salles = pd.read_sql_query("SELECT id, nom FROM Salles ORDER BY nom", conn)
+                    if not df_salles.empty:
+                        dict_salles = dict(zip(df_salles["nom"], df_salles["id"]))
+                        
+                        idx_salle = 0
+                        idx_table = 0
+                        active_salle_id = None
+                        
+                        if st.session_state.table_active:
+                            cursor.execute("SELECT salle_id FROM Tables_Resto WHERE id = ?", (st.session_state.table_active,))
+                            res_salle = cursor.fetchone()
+                            if res_salle:
+                                active_salle_id = res_salle[0]
+                                for i, (nom_s, id_s) in enumerate(dict_salles.items()):
+                                    if id_s == active_salle_id:
+                                        idx_salle = i
+                                        break
+
+                        col_zs, col_zt = st.columns(2)
+                        
+                        choix_salle = col_zs.selectbox(
+                            "Sélectionnez une zone :",
+                            options=list(dict_salles.keys()),
+                            index=idx_salle,
+                            disabled=panier_actif
+                        )
+                        salle_selected_id = dict_salles[choix_salle]
+
+                        df_tables = pd.read_sql_query(
+                            "SELECT id, numero_table, statut FROM Tables_Resto WHERE salle_id = ? ORDER BY numero_table",
+                            conn, params=(salle_selected_id,)
+                        )
+                        if not df_tables.empty:
+                            df_tables["label"] = df_tables["numero_table"] + " (" + df_tables["statut"] + ")"
+                            dict_tables_resto = dict(zip(df_tables["label"], df_tables["id"]))
+
+                            if st.session_state.table_active and active_salle_id == salle_selected_id:
+                                for i, (label_t, id_t) in enumerate(dict_tables_resto.items()):
+                                    if id_t == st.session_state.table_active:
+                                        idx_table = i
+                                        break
+
+                            choix_t = col_zt.selectbox(
+                                "Sélectionnez une table :",
+                                options=list(dict_tables_resto.keys()),
+                                index=idx_table if st.session_state.table_active else None,
+                                disabled=panier_actif,
+                                placeholder="Choisir une table..."
+                            )
+                            if choix_t:
+                                table_selectionnee_id = int(dict_tables_resto[choix_t])
+                                st.session_state.table_active = table_selectionnee_id
+                            else:
+                                table_selectionnee_id = None
+                            
+                            # --- TRANSFERT DE TABLE ---
+                            if st.session_state.commande_id_en_cours and panier_actif:
+                                st.markdown("<div style='margin-top: 5px;'></div>", unsafe_allow_html=True)
+                                with st.expander("🔄 Transférer ce ticket vers une autre table"):
+                                    df_salles_dest = pd.read_sql_query("SELECT id, nom FROM Salles ORDER BY nom", conn)
+                                    if not df_salles_dest.empty:
+                                        salles_dest_dict = dict(zip(df_salles_dest["nom"], df_salles_dest["id"]))
+                                        choix_salle_dest = st.selectbox("Zone de destination :", options=list(salles_dest_dict.keys()), key="dest_salle")
+                                        
+                                        df_tables_dest = pd.read_sql_query(
+                                            "SELECT id, numero_table FROM Tables_Resto WHERE salle_id = ? AND statut = 'Libre' ORDER BY numero_table",
+                                            conn, params=(salles_dest_dict[choix_salle_dest],)
+                                        )
+                                        if not df_tables_dest.empty:
+                                            tables_dest_dict = dict(zip(df_tables_dest["numero_table"], df_tables_dest["id"]))
+                                            choix_table_dest = st.selectbox("Table de destination :", options=list(tables_dest_dict.keys()), key="dest_table")
+                                            
+                                            if st.button("Valider le transfert", type="primary"):
+                                                nouvelle_table_id = tables_dest_dict[choix_table_dest]
+                                                ancienne_table_id = st.session_state.table_active
+                                                cmd_id = st.session_state.commande_id_en_cours
+                                                
+                                                cursor_t = conn.cursor()
+                                                cursor_t.execute("UPDATE Tables_Resto SET statut = 'Libre', demande_addition = 0 WHERE id = ?", (ancienne_table_id,))
+                                                cursor_t.execute("UPDATE Tables_Resto SET statut = 'Occupée' WHERE id = ?", (nouvelle_table_id,))
+                                                cursor_t.execute("UPDATE Commandes SET table_id = ? WHERE id = ?", (nouvelle_table_id, cmd_id))
+                                                conn.commit()
+                                                
+                                                st.session_state.table_active = nouvelle_table_id
+                                                st.success(f"Ticket transféré vers {choix_table_dest} !")
+                                                st.rerun()
+                                        else:
+                                            st.info(f"Aucune table libre dans la zone {choix_salle_dest}.")
+
+                            if table_selectionnee_id:
+                                cursor.execute(
+                                    "SELECT id FROM Commandes WHERE table_id = ? AND statut = 'En attente'",
+                                    (table_selectionnee_id,),
+                                )
+                                cmd_existante = cursor.fetchone()
+                                if cmd_existante:
+                                    st.warning(f"⚠️ Ticket en attente (#{cmd_existante[0]}).")
+                                    if st.button("🔄 Charger le ticket"):
+                                        st.session_state.commande_id_en_cours = (
+                                            cmd_existante[0]
+                                        )
+                                        
+                                        cursor.execute("SELECT client_id FROM Commandes WHERE id = ?", (cmd_existante[0],))
+                                        c_id_res = cursor.fetchone()
+                                        if c_id_res and c_id_res[0]:
+                                            c_id = c_id_res[0]
+                                            label_found = "Passager (Anonyme)"
+                                            for lbl, db_id in dict_clients.items():
+                                                if db_id == c_id:
+                                                    label_found = lbl
+                                                    break
+                                            st.session_state.active_client_name = label_found
+                                        else:
+                                            st.session_state.active_client_name = "Passager (Anonyme)"
+
+                                        df_lignes = pd.read_sql_query(
+                                            "SELECT lc.produit_id as id, p.nom, p.prix as prix_base, lc.prix_unitaire as prix, lc.quantite as qte, lc.quantite_envoyee, lc.quantite_offert_envoyee, lc.quantite_retour_envoyee FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id WHERE lc.commande_id = ?",
+                                            conn,
+                                            params=(cmd_existante[0],),
+                                        )
+                                        st.session_state.panier = {}
+                                        for _, row in df_lignes.iterrows():
+                                            p_id = int(row["id"])
+                                            qte = int(row["qte"])
+                                            prix_ligne = float(row["prix"])
+                                            prix_b = float(row["prix_base"])
+                                            
+                                            qte_env = int(row["quantite_envoyee"]) if not pd.isna(row.get("quantite_envoyee")) else 0
+                                            qte_off_env = int(row["quantite_offert_envoyee"]) if not pd.isna(row.get("quantite_offert_envoyee")) else 0
+                                            qte_ret_env = int(row["quantite_retour_envoyee"]) if not pd.isna(row.get("quantite_retour_envoyee")) else 0
+
+                                            if p_id not in st.session_state.panier:
+                                                st.session_state.panier[p_id] = {
+                                                    "nom": row["nom"],
+                                                    "prix_base": prix_b,
+                                                    "qte": 0,
+                                                    "qte_retour": 0,
+                                                    "qte_offert": 0,
+                                                    "qte_envoyee": 0,             
+                                                    "qte_offert_envoyee": 0,      
+                                                    "qte_retour_envoyee": 0       
+                                                }
+                                            if qte > 0:
+                                                if prix_ligne == 0:
+                                                    st.session_state.panier[p_id]["qte_offert"] += qte
+                                                    st.session_state.panier[p_id]["qte_offert_envoyee"] += qte_off_env
+                                                else:
+                                                    st.session_state.panier[p_id]["qte"] += qte
+                                                    st.session_state.panier[p_id]["qte_envoyee"] += qte_env
+                                            elif qte < 0:
+                                                st.session_state.panier[p_id]["qte_retour"] += abs(qte)
+                                                st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
+                                        st.rerun()
+                                else:
+                                    st.session_state.commande_id_en_cours = None
                         else:
                             st.warning(f"Aucune table configurée dans la zone {choix_salle}.")
                     else:
@@ -2192,82 +2202,112 @@ elif menu == "Prise de Commande":
                     st.session_state.table_active = None
 
             st.divider()
-            st.markdown("##### 2. Menu")
-            
-            # --- RECHERCHE GLOBALE RAPIDE ---
-            df_all_prods = pd.read_sql_query("SELECT id, nom, prix FROM Produits ORDER BY nom", conn)
-            if not df_all_prods.empty:
-                dict_all_prods = {f"{row['nom']} - {fmt_prix(row['prix'])} F": row['id'] for _, row in df_all_prods.iterrows()}
-                with st.form("form_search_add", clear_on_submit=True):
-                    col_search, col_sbtn = st.columns([4, 1])
-                    plat_recherche = col_search.selectbox(
-                        "Recherche rapide", 
-                        options=list(dict_all_prods.keys()), 
-                        index=None, 
-                        placeholder="🔍 Tapez le nom d'un article pour l'ajouter rapidement...", 
-                        label_visibility="collapsed"
-                    )
-                    if col_sbtn.form_submit_button("➕ Ajouter", use_container_width=True):
-                        if plat_recherche:
-                            p_id = int(dict_all_prods[plat_recherche])
-                            row_prod = df_all_prods[df_all_prods['id'] == p_id].iloc[0]
-                            if p_id in st.session_state.panier:
-                                st.session_state.panier[p_id]["qte"] += 1
-                            else:
-                                st.session_state.panier[p_id] = {
-                                    "nom": row_prod["nom"],
-                                    "prix_base": float(row_prod["prix"]),
-                                    "qte": 1,
-                                    "qte_retour": 0,
-                                    "qte_offert": 0,
-                                    "qte_envoyee": 0,             
-                                    "qte_offert_envoyee": 0,      
-                                    "qte_retour_envoyee": 0       
-                                }
-                            st.rerun()
-            
-            st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
-            
-            # --- ONGLETS CATÉGORIES CLASSIQUES ---
-            df_categories = pd.read_sql_query(
-                "SELECT id, nom FROM Categories ORDER BY nom", conn
-            )
-            if not df_categories.empty:
-                onglets = st.tabs(df_categories["nom"].tolist())
-                for i, onglet in enumerate(onglets):
-                    cat_id = int(df_categories.iloc[i]["id"])
-                    df_prods = pd.read_sql_query(
-                        "SELECT id, nom, prix FROM Produits WHERE categorie_id = ? ORDER BY nom",
-                        conn,
-                        params=(cat_id,),
-                    )
-                    with onglet:
-                        if not df_prods.empty:
-                            cols_produits = st.columns(3)
-                            for index, row in df_prods.iterrows():
-                                col_idx = index % 3
-                                if cols_produits[col_idx].button(
-                                    f"{row['nom']}\n{fmt_prix(row['prix'])} F",
-                                    key=f"btn_prod_{row['id']}",
-                                    use_container_width=True
-                                ):
-                                    p_id = int(row["id"])
-                                    if p_id in st.session_state.panier:
-                                        st.session_state.panier[p_id]["qte"] += 1
-                                    else:
-                                        st.session_state.panier[p_id] = {
-                                            "nom": row["nom"],
-                                            "prix_base": float(row["prix"]),
-                                            "qte": 1,
-                                            "qte_retour": 0,
-                                            "qte_offert": 0,
-                                            "qte_envoyee": 0,
-                                            "qte_offert_envoyee": 0,
-                                            "qte_retour_envoyee": 0
-                                        }
-                                    st.rerun()
+
+            # --- SÉCURITÉ DU MENU ---
+            menu_lock = False
+            msg_lock = ""
+
+            if type_cmd == "Sur Place":
+                if not table_selectionnee_id:
+                    menu_lock = True
+                    msg_lock = "⚠️ Veuillez sélectionner une Table ci-dessus pour ouvrir le menu."
+                else:
+                    cursor.execute("SELECT id FROM Commandes WHERE table_id = ? AND statut = 'En attente'", (table_selectionnee_id,))
+                    cmd_existante = cursor.fetchone()
+                    if cmd_existante and st.session_state.commande_id_en_cours != cmd_existante[0]:
+                        menu_lock = True
+                        msg_lock = f"⚠️ La table est occupée (Ticket #{cmd_existante[0]}). Cliquez sur 'Charger le ticket' dans les informations ci-dessus pour y ajouter des articles."
+
+            elif type_cmd == "Room Service":
+                if not chambre_selectionnee_id:
+                    menu_lock = True
+                    msg_lock = "⚠️ Veuillez sélectionner une Chambre ci-dessus pour ouvrir le menu."
+                else:
+                    cursor.execute("SELECT id FROM Commandes WHERE chambre_id = ? AND statut = 'En attente'", (chambre_selectionnee_id,))
+                    cmd_existante = cursor.fetchone()
+                    if cmd_existante and st.session_state.commande_id_en_cours != cmd_existante[0]:
+                        menu_lock = True
+                        msg_lock = f"⚠️ Un ticket est en cours pour cette chambre (#{cmd_existante[0]}). Cliquez sur 'Charger le ticket' ci-dessus."
+
+            if menu_lock:
+                st.error(msg_lock)
             else:
-                st.warning("Le menu est vide.")
+                st.markdown("##### 2. Menu")
+                
+                # --- RECHERCHE GLOBALE RAPIDE ---
+                df_all_prods = pd.read_sql_query("SELECT id, nom, prix FROM Produits ORDER BY nom", conn)
+                if not df_all_prods.empty:
+                    dict_all_prods = {f"{row['nom']} - {fmt_prix(row['prix'])} F": row['id'] for _, row in df_all_prods.iterrows()}
+                    with st.form("form_search_add", clear_on_submit=True):
+                        col_search, col_sbtn = st.columns([4, 1])
+                        plat_recherche = col_search.selectbox(
+                            "Recherche rapide", 
+                            options=list(dict_all_prods.keys()), 
+                            index=None, 
+                            placeholder="🔍 Tapez le nom d'un article pour l'ajouter rapidement...", 
+                            label_visibility="collapsed"
+                        )
+                        if col_sbtn.form_submit_button("➕ Ajouter", use_container_width=True):
+                            if plat_recherche:
+                                p_id = int(dict_all_prods[plat_recherche])
+                                row_prod = df_all_prods[df_all_prods['id'] == p_id].iloc[0]
+                                if p_id in st.session_state.panier:
+                                    st.session_state.panier[p_id]["qte"] += 1
+                                else:
+                                    st.session_state.panier[p_id] = {
+                                        "nom": row_prod["nom"],
+                                        "prix_base": float(row_prod["prix"]),
+                                        "qte": 1,
+                                        "qte_retour": 0,
+                                        "qte_offert": 0,
+                                        "qte_envoyee": 0,             
+                                        "qte_offert_envoyee": 0,      
+                                        "qte_retour_envoyee": 0       
+                                    }
+                                st.rerun()
+                
+                st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
+                
+                # --- ONGLETS CATÉGORIES CLASSIQUES ---
+                df_categories = pd.read_sql_query(
+                    "SELECT id, nom FROM Categories ORDER BY nom", conn
+                )
+                if not df_categories.empty:
+                    onglets = st.tabs(df_categories["nom"].tolist())
+                    for i, onglet in enumerate(onglets):
+                        cat_id = int(df_categories.iloc[i]["id"])
+                        df_prods = pd.read_sql_query(
+                            "SELECT id, nom, prix FROM Produits WHERE categorie_id = ? ORDER BY nom",
+                            conn,
+                            params=(cat_id,),
+                        )
+                        with onglet:
+                            if not df_prods.empty:
+                                cols_produits = st.columns(3)
+                                for index, row in df_prods.iterrows():
+                                    col_idx = index % 3
+                                    if cols_produits[col_idx].button(
+                                        f"{row['nom']}\n{fmt_prix(row['prix'])} F",
+                                        key=f"btn_prod_{row['id']}",
+                                        use_container_width=True
+                                    ):
+                                        p_id = int(row["id"])
+                                        if p_id in st.session_state.panier:
+                                            st.session_state.panier[p_id]["qte"] += 1
+                                        else:
+                                            st.session_state.panier[p_id] = {
+                                                "nom": row["nom"],
+                                                "prix_base": float(row["prix"]),
+                                                "qte": 1,
+                                                "qte_retour": 0,
+                                                "qte_offert": 0,
+                                                "qte_envoyee": 0,
+                                                "qte_offert_envoyee": 0,
+                                                "qte_retour_envoyee": 0
+                                            }
+                                        st.rerun()
+                else:
+                    st.warning("Le menu est vide.")
 
         with col_ticket:
             titre_ticket = (
@@ -2541,6 +2581,17 @@ elif menu == "Prise de Commande":
                         else:
                             client_id_db = exists[0]
 
+                    # SÉCURITÉ ANTI-DOUBLONS (DB Level)
+                    if st.session_state.commande_id_en_cours is None:
+                        if type_cmd == "Sur Place" and table_selectionnee_id:
+                            cursor.execute("SELECT id FROM Commandes WHERE table_id = ? AND statut = 'En attente'", (table_selectionnee_id,))
+                            dup = cursor.fetchone()
+                            if dup: st.session_state.commande_id_en_cours = dup[0]
+                        elif type_cmd == "Room Service" and chambre_selectionnee_id:
+                            cursor.execute("SELECT id FROM Commandes WHERE chambre_id = ? AND statut = 'En attente'", (chambre_selectionnee_id,))
+                            dup = cursor.fetchone()
+                            if dup: st.session_state.commande_id_en_cours = dup[0]
+
                     if st.session_state.commande_id_en_cours is None:
                         cursor.execute(
                             "INSERT INTO Commandes (type_commande, table_id, chambre_id, statut, total, nom_client, telephone, adresse, client_id, utilisateur_id, zone_id, frais_livraison) VALUES (?, ?, ?, 'En attente', ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2648,6 +2699,17 @@ elif menu == "Prise de Commande":
                             client_id_db = cursor.lastrowid
                         else:
                             client_id_db = exists[0]
+
+                    # SÉCURITÉ ANTI-DOUBLONS (DB Level)
+                    if st.session_state.commande_id_en_cours is None:
+                        if type_cmd == "Sur Place" and table_selectionnee_id:
+                            cursor.execute("SELECT id FROM Commandes WHERE table_id = ? AND statut = 'En attente'", (table_selectionnee_id,))
+                            dup = cursor.fetchone()
+                            if dup: st.session_state.commande_id_en_cours = dup[0]
+                        elif type_cmd == "Room Service" and chambre_selectionnee_id:
+                            cursor.execute("SELECT id FROM Commandes WHERE chambre_id = ? AND statut = 'En attente'", (chambre_selectionnee_id,))
+                            dup = cursor.fetchone()
+                            if dup: st.session_state.commande_id_en_cours = dup[0]
 
                     if st.session_state.commande_id_en_cours is None:
                         cursor.execute(
@@ -2833,6 +2895,7 @@ elif menu == "Prise de Commande":
                         full_print_str += "\n\n\n\n"
                         nom_exp_b = f"Bon_{cmd_id}-{nouveau_compteur}_{file_date_str}.txt"
                         
+                        # CODE UNIVERSEL (Impression Windows auto, ou simple Sauvegarde sur Cloud)
                         if hasattr(os, 'startfile'):
                             imprimer_ticket_windows(
                                 full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons"
@@ -2900,6 +2963,17 @@ elif menu == "Prise de Commande":
                                         "%Y-%m-%d %H:%M:%S"
                                     )
                                 )
+
+                                # SÉCURITÉ ANTI-DOUBLONS (DB Level)
+                                if st.session_state.commande_id_en_cours is None:
+                                    if type_cmd == "Sur Place" and table_selectionnee_id:
+                                        cursor.execute("SELECT id FROM Commandes WHERE table_id = ? AND statut = 'En attente'", (table_selectionnee_id,))
+                                        dup = cursor.fetchone()
+                                        if dup: st.session_state.commande_id_en_cours = dup[0]
+                                    elif type_cmd == "Room Service" and chambre_selectionnee_id:
+                                        cursor.execute("SELECT id FROM Commandes WHERE chambre_id = ? AND statut = 'En attente'", (chambre_selectionnee_id,))
+                                        dup = cursor.fetchone()
+                                        if dup: st.session_state.commande_id_en_cours = dup[0]
     
                                 if st.session_state.commande_id_en_cours is None:
                                     cursor.execute(
@@ -3178,6 +3252,7 @@ elif menu == "Prise de Commande":
                                     file_date_str_ticket = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                                     nom_exp = f"Ticket_Client_{cmd_id}_{file_date_str_ticket}.txt"
                                     
+                                    # CODE UNIVERSEL POUR L'ENCAISSEMENT
                                     if hasattr(os, 'startfile'):
                                         imprimer_ticket_windows(
                                             ticket_str, nom_fichier_export=nom_exp, sous_dossier="tickets"
@@ -3692,7 +3767,6 @@ elif menu == "Prise de Commande":
                     col_vue, col_print = st.columns([1, 1])
                     col_vue.code(ticket_str, language="text")
                     
-                    # Code Universel pour l'historique
                     file_date_str_dup = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                     nom_exp_dup = f"Duplicata_Ticket_{choix_detail}_{file_date_str_dup}.txt"
                     
