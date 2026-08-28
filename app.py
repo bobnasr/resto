@@ -47,7 +47,6 @@ def force_db_update():
     conn = sqlite3.connect(chemin_db, timeout=20)
     cursor = conn.cursor()
 
-    # --- CRÉATION DE TOUTES LES TABLES DE BASE ---
     cursor.execute(
         """CREATE TABLE IF NOT EXISTS Commandes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,7 +168,6 @@ def force_db_update():
         )"""
     )
 
-    # --- DONNÉES PAR DÉFAUT ---
     cursor.execute("SELECT count(*) FROM Utilisateurs")
     if cursor.fetchone()[0] == 0:
         cursor.execute(
@@ -191,7 +189,6 @@ def force_db_update():
         if cursor.fetchone()[0] == 0:
             cursor.execute("INSERT INTO Methodes_Paiement (nom) VALUES ('Note de Chambre')")
 
-    # --- MISES À JOUR DES TABLES (ALTER) ---
     cursor.execute("PRAGMA table_info(Parametres_Restaurant)")
     colonnes_param = [col[1] for col in cursor.fetchall()]
     if "heure_fin_service" not in colonnes_param:
@@ -295,6 +292,7 @@ def get_connection():
 
 
 def imprimer_ticket_windows(texte_ticket, nom_fichier_export="ticket_print.txt", sous_dossier=None):
+    """Sauvegarde le ticket localement et déclenche l'impression UNIQUEMENT si exécuté sur Windows"""
     try:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         if sous_dossier:
@@ -306,12 +304,14 @@ def imprimer_ticket_windows(texte_ticket, nom_fichier_export="ticket_print.txt",
         chemin_fichier = os.path.join(target_dir, nom_fichier_export)
         with open(chemin_fichier, "w", encoding="utf-8-sig") as f:
             f.write(texte_ticket)
-        if os.name == "nt":
+            
+        if hasattr(os, 'startfile'):
             os.startfile(chemin_fichier, "print")
             return True
+            
+        return True
     except Exception:
         return False
-    return False
 
 def sauvegarder_ticket_local(texte_ticket, nom_fichier_export="ticket_print.txt", sous_dossier=None):
     """Sauvegarde le ticket localement sans déclencher l'impression Windows pour compatibilité Cloud"""
@@ -385,6 +385,8 @@ if "utilisateur" not in st.session_state:
     st.session_state.utilisateur = None
 if "active_client_name" not in st.session_state:
     st.session_state.active_client_name = "Passager (Anonyme)"
+if "radio_type_cmd" not in st.session_state:
+    st.session_state.radio_type_cmd = "Sur Place"
 
 # Écran de connexion
 if st.session_state.utilisateur is None:
@@ -560,11 +562,12 @@ elif menu == "Tableau de Bord":
     
     col1, col2, col3 = st.columns(3)
     df_cmd = pd.read_sql_query(
-        "SELECT date_creation, total FROM Commandes WHERE statut = 'Payée'",
+        "SELECT date_creation, date_paiement, total FROM Commandes WHERE statut = 'Payée'",
         conn,
     )
     if not df_cmd.empty:
-        df_cmd['Date_Exploitation'] = (pd.to_datetime(df_cmd['date_creation']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+        df_cmd['date_calc'] = df_cmd['date_paiement'].fillna(df_cmd['date_creation'])
+        df_cmd['Date_Exploitation'] = (pd.to_datetime(df_cmd['date_calc']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
         df_today = df_cmd[df_cmd['Date_Exploitation'] == aujourdhui_biz]
         nb_cmd = len(df_today)
         ca_total = df_today['total'].sum()
@@ -1436,6 +1439,7 @@ elif menu == "Stocks & Préparations":
                     st.success("Stocks et mouvements réinitialisés à zéro !")
                     st.rerun()
 
+        # OPTIMISATION CLOUD : Limitation à 500 résultats pour ne pas surcharger la RAM
         df_hist_stock = pd.read_sql_query(
             """
             SELECT m.date_mvt as 'Date & Heure', p.nom as 'Produit', c.nom as 'Catégorie', d.nom as 'Dépôt', 
@@ -1445,7 +1449,7 @@ elif menu == "Stocks & Préparations":
             JOIN Produits p ON m.produit_id = p.id 
             JOIN Categories c ON p.categorie_id = c.id
             JOIN Depots d ON m.depot_id = d.id 
-            ORDER BY m.date_mvt DESC
+            ORDER BY m.date_mvt DESC LIMIT 500
         """,
             conn,
         )
@@ -1681,8 +1685,66 @@ elif menu == "Prise de Commande":
             for idx, (t_id, t_num) in enumerate(demandes):
                 with cols_demandes[idx % 4]:
                     st.info(f"Table {t_num} demande l'addition !")
-                    if st.button(f"✔️ OK (Table {t_num})", key=f"ok_add_{t_id}"):
+                    if st.button(f"✔️ Ouvrir Ticket ({t_num})", key=f"ok_add_{t_id}"):
                         cursor.execute("UPDATE Tables_Resto SET demande_addition = 0 WHERE id = ?", (t_id,))
+                        
+                        # Rechercher la commande en attente pour cette table
+                        cursor.execute("SELECT id, client_id FROM Commandes WHERE table_id = ? AND statut = 'En attente'", (t_id,))
+                        cmd_existante = cursor.fetchone()
+                        if cmd_existante:
+                            cmd_id_load = cmd_existante[0]
+                            c_id = cmd_existante[1]
+                            
+                            st.session_state.commande_id_en_cours = cmd_id_load
+                            st.session_state.table_active = t_id
+                            st.session_state.radio_type_cmd = "Sur Place"
+                            
+                            label_found = "Passager (Anonyme)"
+                            if c_id:
+                                cursor.execute("SELECT id, nom, telephone FROM Clients WHERE id = ?", (c_id,))
+                                c_res = cursor.fetchone()
+                                if c_res:
+                                    label_found = f"CLI-{c_res[0]:04d} : {c_res[1]} ({c_res[2]})"
+                            st.session_state.active_client_name = label_found
+                            
+                            df_lignes = pd.read_sql_query(
+                                "SELECT lc.produit_id as id, p.nom, p.prix as prix_base, lc.prix_unitaire as prix, lc.quantite as qte, lc.quantite_envoyee, lc.quantite_offert_envoyee, lc.quantite_retour_envoyee FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id WHERE lc.commande_id = ?",
+                                conn,
+                                params=(cmd_id_load,),
+                            )
+                            st.session_state.panier = {}
+                            for _, row in df_lignes.iterrows():
+                                p_id = int(row["id"])
+                                qte = int(row["qte"])
+                                prix_ligne = float(row["prix"])
+                                prix_b = float(row["prix_base"])
+                                
+                                qte_env = int(row["quantite_envoyee"]) if not pd.isna(row.get("quantite_envoyee")) else 0
+                                qte_off_env = int(row["quantite_offert_envoyee"]) if not pd.isna(row.get("quantite_offert_envoyee")) else 0
+                                qte_ret_env = int(row["quantite_retour_envoyee"]) if not pd.isna(row.get("quantite_retour_envoyee")) else 0
+
+                                if p_id not in st.session_state.panier:
+                                    st.session_state.panier[p_id] = {
+                                        "nom": row["nom"],
+                                        "prix_base": prix_b,
+                                        "qte": 0,
+                                        "qte_retour": 0,
+                                        "qte_offert": 0,
+                                        "qte_envoyee": 0,             
+                                        "qte_offert_envoyee": 0,      
+                                        "qte_retour_envoyee": 0       
+                                    }
+                                if qte > 0:
+                                    if prix_ligne == 0:
+                                        st.session_state.panier[p_id]["qte_offert"] += qte
+                                        st.session_state.panier[p_id]["qte_offert_envoyee"] += qte_off_env
+                                    else:
+                                        st.session_state.panier[p_id]["qte"] += qte
+                                        st.session_state.panier[p_id]["qte_envoyee"] += qte_env
+                                elif qte < 0:
+                                    st.session_state.panier[p_id]["qte_retour"] += abs(qte)
+                                    st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
+                        
                         conn.commit()
                         st.rerun()
             st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
@@ -1720,6 +1782,7 @@ elif menu == "Prise de Commande":
             col_type, col_info = st.columns([1, 1.5])
             type_cmd = col_type.radio(
                 "Type :", ["Sur Place", "À Emporter", "Livraison", "Room Service"],
+                key="radio_type_cmd",
                 disabled=panier_actif
             )
 
@@ -1868,9 +1931,9 @@ elif menu == "Prise de Commande":
                                             "qte": 0,
                                             "qte_retour": 0,
                                             "qte_offert": 0,
-                                            "qte_envoyee": qte_env,
-                                            "qte_offert_envoyee": qte_off_env,
-                                            "qte_retour_envoyee": qte_ret_env
+                                            "qte_envoyee": 0,             
+                                            "qte_offert_envoyee": 0,      
+                                            "qte_retour_envoyee": 0       
                                         }
                                     if qte > 0:
                                         if prix_ligne == 0:
@@ -2022,9 +2085,9 @@ elif menu == "Prise de Commande":
                                                 "qte": 0,
                                                 "qte_retour": 0,
                                                 "qte_offert": 0,
-                                                "qte_envoyee": qte_env,
-                                                "qte_offert_envoyee": qte_off_env,
-                                                "qte_retour_envoyee": qte_ret_env
+                                                "qte_envoyee": 0,             
+                                                "qte_offert_envoyee": 0,      
+                                                "qte_retour_envoyee": 0       
                                             }
                                         if qte > 0:
                                             if prix_ligne == 0:
@@ -2107,9 +2170,9 @@ elif menu == "Prise de Commande":
                                             "qte": 0,
                                             "qte_retour": 0,
                                             "qte_offert": 0,
-                                            "qte_envoyee": qte_env,
-                                            "qte_offert_envoyee": qte_off_env,
-                                            "qte_retour_envoyee": qte_ret_env
+                                            "qte_envoyee": 0,             
+                                            "qte_offert_envoyee": 0,      
+                                            "qte_retour_envoyee": 0       
                                         }
                                     if qte > 0:
                                         if prix_ligne == 0:
@@ -2130,6 +2193,42 @@ elif menu == "Prise de Commande":
 
             st.divider()
             st.markdown("##### 2. Menu")
+            
+            # --- RECHERCHE GLOBALE RAPIDE ---
+            df_all_prods = pd.read_sql_query("SELECT id, nom, prix FROM Produits ORDER BY nom", conn)
+            if not df_all_prods.empty:
+                dict_all_prods = {f"{row['nom']} - {fmt_prix(row['prix'])} F": row['id'] for _, row in df_all_prods.iterrows()}
+                with st.form("form_search_add", clear_on_submit=True):
+                    col_search, col_sbtn = st.columns([4, 1])
+                    plat_recherche = col_search.selectbox(
+                        "Recherche rapide", 
+                        options=list(dict_all_prods.keys()), 
+                        index=None, 
+                        placeholder="🔍 Tapez le nom d'un article pour l'ajouter rapidement...", 
+                        label_visibility="collapsed"
+                    )
+                    if col_sbtn.form_submit_button("➕ Ajouter", use_container_width=True):
+                        if plat_recherche:
+                            p_id = int(dict_all_prods[plat_recherche])
+                            row_prod = df_all_prods[df_all_prods['id'] == p_id].iloc[0]
+                            if p_id in st.session_state.panier:
+                                st.session_state.panier[p_id]["qte"] += 1
+                            else:
+                                st.session_state.panier[p_id] = {
+                                    "nom": row_prod["nom"],
+                                    "prix_base": float(row_prod["prix"]),
+                                    "qte": 1,
+                                    "qte_retour": 0,
+                                    "qte_offert": 0,
+                                    "qte_envoyee": 0,             
+                                    "qte_offert_envoyee": 0,      
+                                    "qte_retour_envoyee": 0       
+                                }
+                            st.rerun()
+            
+            st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
+            
+            # --- ONGLETS CATÉGORIES CLASSIQUES ---
             df_categories = pd.read_sql_query(
                 "SELECT id, nom FROM Categories ORDER BY nom", conn
             )
@@ -2356,7 +2455,9 @@ elif menu == "Prise de Commande":
                     df_paiement = pd.read_sql_query(
                         "SELECT nom FROM Methodes_Paiement ORDER BY nom", conn
                     )
-                    options_paiement = ["-- Sélectionner --"] + df_paiement["nom"].tolist()
+                    options_paiement = ["-- Sélectionner --", "À Crédit"] + df_paiement[
+                        "nom"
+                    ].tolist()
                     
                     idx_paiement = 0
                     if type_cmd == "Room Service":
@@ -2731,10 +2832,17 @@ elif menu == "Prise de Commande":
                             full_print_str += bon_str
                         full_print_str += "\n\n\n\n"
                         nom_exp_b = f"Bon_{cmd_id}-{nouveau_compteur}_{file_date_str}.txt"
-                        sauvegarder_ticket_local(
-                            full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons"
-                        )
-                        msg_print = "Nouveaux plats envoyés en préparation (Dossier 'bons' mis à jour)."
+                        
+                        if hasattr(os, 'startfile'):
+                            imprimer_ticket_windows(
+                                full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons"
+                            )
+                            msg_print = "Nouveaux plats envoyés en préparation et imprimés !"
+                        else:
+                            sauvegarder_ticket_local(
+                                full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons"
+                            )
+                            msg_print = "Nouveaux plats enregistrés en préparation."
                     else:
                         msg_print = "Rien de nouveau à imprimer pour la cuisine/bar."
 
@@ -3069,9 +3177,15 @@ elif menu == "Prise de Commande":
                                 if auto_print:
                                     file_date_str_ticket = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                                     nom_exp = f"Ticket_Client_{cmd_id}_{file_date_str_ticket}.txt"
-                                    sauvegarder_ticket_local(
-                                        ticket_str, nom_fichier_export=nom_exp, sous_dossier="tickets"
-                                    )
+                                    
+                                    if hasattr(os, 'startfile'):
+                                        imprimer_ticket_windows(
+                                            ticket_str, nom_fichier_export=nom_exp, sous_dossier="tickets"
+                                        )
+                                    else:
+                                        sauvegarder_ticket_local(
+                                            ticket_str, nom_fichier_export=nom_exp, sous_dossier="tickets"
+                                        )
     
                                 if auto_print_bons:
                                     bons_par_depot = {}
@@ -3169,9 +3283,15 @@ elif menu == "Prise de Commande":
                                             full_print_str += bon_str
                                         full_print_str += "\n\n\n\n"
                                         nom_exp_b = f"Bon_{cmd_id}-{nouveau_compteur}_{file_date_str}.txt"
-                                        sauvegarder_ticket_local(
-                                            full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons"
-                                        )
+                                        
+                                        if hasattr(os, 'startfile'):
+                                            imprimer_ticket_windows(
+                                                full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons"
+                                            )
+                                        else:
+                                            sauvegarder_ticket_local(
+                                                full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons"
+                                            )
     
                                 st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
                                 st.session_state.table_active = None
@@ -3183,7 +3303,7 @@ elif menu == "Prise de Commande":
                                     )
                                 else:
                                     st.success(
-                                        "Vente validée. Allez dans l'Historique pour télécharger le ticket."
+                                        "Vente validée et stock mis à jour !"
                                     )
                                 st.rerun()
 
@@ -3223,16 +3343,18 @@ elif menu == "Prise de Commande":
                         st.rerun()
 
             st.subheader("📜 Historique des Tickets")
+            
+            # OPTIMISATION CLOUD : Limitation à 1000 tickets pour ne pas surcharger la RAM
             df_historique = pd.read_sql_query(
                 """
-                SELECT c.id as 'N°', c.date_creation as 'Date', c.type_commande as 'Type', 
+                SELECT c.id as 'N°', c.date_creation as 'Date Création', c.date_paiement as 'Encaissement', c.type_commande as 'Type', 
                 COALESCE(t.numero_table, ch.numero_chambre, '-') as 'Table/Chambre', COALESCE(cl.nom, c.nom_client, '-') as 'Client', 
                 COALESCE(c.methode_paiement, '-') as 'Paiement', c.total as 'Total', c.statut as 'Statut'
                 FROM Commandes c 
                 LEFT JOIN Tables_Resto t ON c.table_id = t.id 
                 LEFT JOIN Chambres_Hotel ch ON c.chambre_id = ch.id
                 LEFT JOIN Clients cl ON c.client_id = cl.id 
-                ORDER BY c.id DESC
+                ORDER BY c.id DESC LIMIT 1000
             """,
                 conn,
             )
@@ -3243,8 +3365,9 @@ elif menu == "Prise de Commande":
                 params_db = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
                 heure_fin = int(params_db.get("heure_fin_service", 5))
                 
-                df_historique['Date_Real'] = pd.to_datetime(df_historique['Date'])
-                df_historique['Date_Exploitation'] = (df_historique['Date_Real'] - pd.Timedelta(hours=heure_fin)).dt.date
+                # MODIFICATION : La date d'exploitation se base sur l'encaissement si payé, sinon la date de création
+                df_historique['Date_Calc'] = pd.to_datetime(df_historique['Encaissement'].fillna(df_historique['Date Création']))
+                df_historique['Date_Exploitation'] = (df_historique['Date_Calc'] - pd.Timedelta(hours=heure_fin)).dt.date
                 
                 c_f1, c_f2, c_f3 = st.columns(3)
                 c_f4, c_f5, c_f6 = st.columns(3)
@@ -3314,8 +3437,9 @@ elif menu == "Prise de Commande":
                         return "color: green;"
                     return ""
 
-                df_afficher_hist = df_filtre.drop(columns=["Date_Real", "Date_Exploitation"], errors='ignore')
-                df_afficher_hist['Date'] = df_afficher_hist['Date'].apply(fmt_date)
+                df_afficher_hist = df_filtre.drop(columns=["Date_Calc", "Date_Exploitation"], errors='ignore')
+                df_afficher_hist['Date Création'] = df_afficher_hist['Date Création'].apply(fmt_date)
+                df_afficher_hist['Encaissement'] = df_afficher_hist['Encaissement'].apply(fmt_date)
                 df_afficher_hist['Total'] = df_afficher_hist['Total'].apply(fmt_prix)
                 
                 st.dataframe(
@@ -3357,25 +3481,27 @@ elif menu == "Prise de Commande":
                             "⚠️ Ce ticket est en attente de paiement (À Crédit / Note de Chambre)."
                         )
                         with st.form("form_regler_credit"):
-                            col_p1, col_p2 = st.columns([2, 1])
-                            mode_choisi = col_p1.selectbox(
+                            c_p1, c_p2, c_p3, c_p4 = st.columns([2, 1.5, 1, 1.5])
+                            mode_choisi = c_p1.selectbox(
                                 "Régler le crédit par :", [p for p in options_paiement_admin if p not in ["À Crédit", "Note de Chambre"]]
                             )
-                            if col_p2.form_submit_button(
-                                "💰 Valider le paiement"
-                            ):
+                            
+                            # NOUVEAU : Choix manuel de la date d'encaissement (par défaut aujourd'hui)
+                            date_default = datetime.datetime.now()
+                            d_date = c_p2.date_input("Date d'encaissement", value=date_default.date())
+                            d_time = c_p3.time_input("Heure", value=date_default.time())
+                            
+                            c_p4.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                            if c_p4.form_submit_button("💰 Valider le paiement", use_container_width=True):
                                 cursor = conn.cursor()
-                                date_paie = (
-                                    datetime.datetime.now().strftime(
-                                        "%Y-%m-%d %H:%M:%S"
-                                    )
-                                )
+                                date_paie = datetime.datetime.combine(d_date, d_time).strftime("%Y-%m-%d %H:%M:%S")
+                                
                                 cursor.execute(
                                     "UPDATE Commandes SET statut='Payée', methode_paiement=?, date_paiement=? WHERE id=?",
                                     (mode_choisi, date_paie, int(choix_detail)),
                                 )
                                 conn.commit()
-                                st.success("Crédit réglé avec succès !")
+                                st.success("Crédit réglé avec succès ! (La somme a été ajoutée à la caisse du jour sélectionné)")
                                 st.rerun()
 
                     elif (
@@ -3566,17 +3692,26 @@ elif menu == "Prise de Commande":
                     col_vue, col_print = st.columns([1, 1])
                     col_vue.code(ticket_str, language="text")
                     
-                    # --- NOUVEAU : BOUTON DE TELECHARGEMENT COMPATIBLE TABLETTE ---
+                    # Code Universel pour l'historique
                     file_date_str_dup = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                     nom_exp_dup = f"Duplicata_Ticket_{choix_detail}_{file_date_str_dup}.txt"
                     
-                    col_print.download_button(
-                        label="🖨️ Télécharger le Ticket (Pour impression Tablette)",
-                        data=ticket_str.encode('utf-8-sig'),
-                        file_name=nom_exp_dup,
-                        mime="text/plain",
-                        type="primary",
-                        use_container_width=True
-                    )
+                    if hasattr(os, 'startfile'):
+                        if col_print.button("🖨️ Envoyer à l'imprimante (Windows)"):
+                            if imprimer_ticket_windows(
+                                ticket_str, nom_fichier_export=nom_exp_dup, sous_dossier="tickets"
+                            ):
+                                st.success("Impression lancée !")
+                            else:
+                                st.error("Erreur d'impression.")
+                    else:
+                        col_print.download_button(
+                            label="🖨️ Télécharger le Ticket (Pour impression Tablette)",
+                            data=ticket_str.encode('utf-8-sig'),
+                            file_name=nom_exp_dup,
+                            mime="text/plain",
+                            type="primary",
+                            use_container_width=True
+                        )
 
 conn.close()
