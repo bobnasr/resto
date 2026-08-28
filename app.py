@@ -1953,8 +1953,8 @@ elif menu == "Prise de Commande":
                                     st.rerun()
                             else:
                                 st.session_state.commande_id_en_cours = None
-                    else:
-                        st.warning("Aucune chambre configurée.")
+                        else:
+                            st.warning("Aucune chambre configurée.")
 
                 if type_cmd == "Sur Place":
                     df_salles = pd.read_sql_query("SELECT id, nom FROM Salles ORDER BY nom", conn)
@@ -3252,7 +3252,6 @@ elif menu == "Prise de Commande":
                                     file_date_str_ticket = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
                                     nom_exp = f"Ticket_Client_{cmd_id}_{file_date_str_ticket}.txt"
                                     
-                                    # CODE UNIVERSEL POUR L'ENCAISSEMENT
                                     if hasattr(os, 'startfile'):
                                         imprimer_ticket_windows(
                                             ticket_str, nom_fichier_export=nom_exp, sous_dossier="tickets"
@@ -3419,20 +3418,24 @@ elif menu == "Prise de Commande":
 
             st.subheader("📜 Historique des Tickets")
             
-            # OPTIMISATION CLOUD : Limitation à 1000 tickets pour ne pas surcharger la RAM
+            # OPTIMISATION CLOUD & FILTRE CAISSIER
             df_historique = pd.read_sql_query(
                 """
                 SELECT c.id as 'N°', c.date_creation as 'Date Création', c.date_paiement as 'Encaissement', c.type_commande as 'Type', 
                 COALESCE(t.numero_table, ch.numero_chambre, '-') as 'Table/Chambre', COALESCE(cl.nom, c.nom_client, '-') as 'Client', 
-                COALESCE(c.methode_paiement, '-') as 'Paiement', c.total as 'Total', c.statut as 'Statut'
+                u.nom as 'Caissier', COALESCE(c.methode_paiement, '-') as 'Paiement', c.total as 'Total', c.statut as 'Statut', c.utilisateur_id
                 FROM Commandes c 
                 LEFT JOIN Tables_Resto t ON c.table_id = t.id 
                 LEFT JOIN Chambres_Hotel ch ON c.chambre_id = ch.id
                 LEFT JOIN Clients cl ON c.client_id = cl.id 
+                LEFT JOIN Utilisateurs u ON c.utilisateur_id = u.id
                 ORDER BY c.id DESC LIMIT 1000
             """,
                 conn,
             )
+
+            if not df_historique.empty and role_actif != "Manager":
+                df_historique = df_historique[df_historique["utilisateur_id"] == st.session_state.utilisateur["id"]]
 
             if df_historique.empty:
                 st.info("Aucun ticket dans l'historique.")
@@ -3440,12 +3443,11 @@ elif menu == "Prise de Commande":
                 params_db = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
                 heure_fin = int(params_db.get("heure_fin_service", 5))
                 
-                # MODIFICATION : La date d'exploitation se base sur l'encaissement si payé, sinon la date de création
                 df_historique['Date_Calc'] = pd.to_datetime(df_historique['Encaissement'].fillna(df_historique['Date Création']))
                 df_historique['Date_Exploitation'] = (df_historique['Date_Calc'] - pd.Timedelta(hours=heure_fin)).dt.date
                 
                 c_f1, c_f2, c_f3 = st.columns(3)
-                c_f4, c_f5, c_f6 = st.columns(3)
+                c_f4, c_f5, c_f6, c_f7 = st.columns(4)
 
                 dates_dispos = list(df_historique['Date_Exploitation'].unique())
                 date_list = ["Toutes"] + dates_dispos
@@ -3477,7 +3479,19 @@ elif menu == "Prise de Commande":
                         list(df_historique["Client"].astype(str).unique())
                     ),
                 )
-                f_paiement = c_f6.selectbox(
+                
+                if role_actif == "Manager":
+                    f_caissier = c_f6.selectbox(
+                        "Caissier :",
+                        ["Tous"]
+                        + sorted(
+                            list(df_historique["Caissier"].astype(str).unique())
+                        ),
+                    )
+                else:
+                    f_caissier = "Tous"
+                    
+                f_paiement = c_f7.selectbox(
                     "Paiement :",
                     ["Tous"]
                     + sorted(
@@ -3496,6 +3510,8 @@ elif menu == "Prise de Commande":
                     df_filtre = df_filtre[df_filtre["Table/Chambre"] == f_table]
                 if f_client != "Tous":
                     df_filtre = df_filtre[df_filtre["Client"] == f_client]
+                if f_caissier != "Tous":
+                    df_filtre = df_filtre[df_filtre["Caissier"] == f_caissier]
                 if f_paiement != "Tous":
                     df_filtre = df_filtre[df_filtre["Paiement"] == f_paiement]
 
@@ -3512,7 +3528,7 @@ elif menu == "Prise de Commande":
                         return "color: green;"
                     return ""
 
-                df_afficher_hist = df_filtre.drop(columns=["Date_Calc", "Date_Exploitation"], errors='ignore')
+                df_afficher_hist = df_filtre.drop(columns=["Date_Calc", "Date_Exploitation", "utilisateur_id"], errors='ignore')
                 df_afficher_hist['Date Création'] = df_afficher_hist['Date Création'].apply(fmt_date)
                 df_afficher_hist['Encaissement'] = df_afficher_hist['Encaissement'].apply(fmt_date)
                 df_afficher_hist['Total'] = df_afficher_hist['Total'].apply(fmt_prix)
