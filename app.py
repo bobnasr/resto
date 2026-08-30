@@ -1089,8 +1089,13 @@ elif menu == "Prise de Commande":
 
             with st.expander("📝 Infos Commande (Client, Table...)", expanded=not panier_actif):
                 col_type, col_info = st.columns([1, 1])
-                type_cmd = col_type.radio("Type :", ["Sur Place", "À Emporter", "Livraison", "Room Service"], key="radio_type_cmd", disabled=panier_actif)
-
+                
+                # Déconnexion de la clé pour éviter le crash Streamlit
+                choix_types = ["Sur Place", "À Emporter", "Livraison", "Room Service"]
+                idx_type = choix_types.index(st.session_state.radio_type_cmd) if st.session_state.radio_type_cmd in choix_types else 0
+                type_cmd = col_type.radio("Type :", choix_types, index=idx_type, disabled=panier_actif)
+                st.session_state.radio_type_cmd = type_cmd
+                
                 table_selectionnee_id = None
                 chambre_selectionnee_id = None
                 client_nom, client_tel, client_adr, client_id_db = "", "", "", None
@@ -1153,7 +1158,7 @@ elif menu == "Prise de Commande":
                             if st.session_state.chambre_active:
                                 for i, (nom_c, id_c) in enumerate(dict_chm.items()):
                                     if id_c == st.session_state.chambre_active: idx_chm = i; break
-                            choix_c = st.selectbox("Chambre :", options=list(dict_chm.keys()), index=idx_chm if st.session_state.chambre_active else None, disabled=panier_actif)
+                            choix_c = st.selectbox("Chambre :", options=list(dict_chm.keys()), index=idx_chm if st.session_state.chambre_active else None, disabled=panier_actif, placeholder="Choisir une chambre...")
                             if choix_c:
                                 chambre_selectionnee_id = int(dict_chm[choix_c])
                                 st.session_state.chambre_active = chambre_selectionnee_id
@@ -1166,7 +1171,8 @@ elif menu == "Prise de Commande":
                                     st.warning(f"⚠️ Ticket en attente (#{cmd_existante[0]}).")
                                     if st.button("🔄 Charger le ticket"):
                                         st.session_state.commande_id_en_cours = cmd_existante[0]
-                                        st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
+                                        st.session_state.paiements_partiels = []
+                                        st.session_state.pourboire_ticket = 0.0
                                         cursor.execute("SELECT client_id FROM Commandes WHERE id = ?", (cmd_existante[0],))
                                         c_id_res = cursor.fetchone()
                                         if c_id_res and c_id_res[0]:
@@ -1221,7 +1227,7 @@ elif menu == "Prise de Commande":
                                 for i, (label_t, id_t) in enumerate(dict_tables_resto.items()):
                                     if id_t == st.session_state.table_active: idx_table = i; break
 
-                            choix_t = col_zt.selectbox("Table :", options=list(dict_tables_resto.keys()), index=idx_table if st.session_state.table_active else None, disabled=panier_actif)
+                            choix_t = col_zt.selectbox("Table :", options=list(dict_tables_resto.keys()), index=idx_table if st.session_state.table_active else None, disabled=panier_actif, placeholder="Choisir une table...")
                             if choix_t:
                                 table_selectionnee_id = int(dict_tables_resto[choix_t])
                                 st.session_state.table_active = table_selectionnee_id
@@ -1258,7 +1264,8 @@ elif menu == "Prise de Commande":
                                     st.warning(f"⚠️ Ticket en attente (#{cmd_existante[0]}).")
                                     if st.button("🔄 Charger le ticket"):
                                         st.session_state.commande_id_en_cours = cmd_existante[0]
-                                        st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
+                                        st.session_state.paiements_partiels = []
+                                        st.session_state.pourboire_ticket = 0.0
                                         cursor.execute("SELECT client_id FROM Commandes WHERE id = ?", (cmd_existante[0],))
                                         c_id_res = cursor.fetchone()
                                         if c_id_res and c_id_res[0]:
@@ -1298,7 +1305,8 @@ elif menu == "Prise de Commande":
                             if st.button("🔄 Charger ce ticket"):
                                 cmd_id_load = dict_attente[choix_attente]
                                 st.session_state.commande_id_en_cours = cmd_id_load
-                                st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
+                                st.session_state.paiements_partiels = []
+                                st.session_state.pourboire_ticket = 0.0
                                 cursor.execute("SELECT client_id FROM Commandes WHERE id = ?", (cmd_id_load,))
                                 c_id_res = cursor.fetchone()
                                 if c_id_res and c_id_res[0]:
@@ -1402,7 +1410,8 @@ elif menu == "Prise de Commande":
                     for p in st.session_state.paiements_partiels:
                         if p["methode"] != "Espèces":
                             if p["montant"] > reste:
-                                pourboire_calcule += (p["montant"] - reste); reste = 0.0
+                                pourboire_calcule += (p["montant"] - reste)
+                                reste = 0.0
                             else: reste -= p["montant"]
                         else: reste -= p["montant"]
                             
@@ -1822,7 +1831,7 @@ elif menu == "Prise de Commande":
             menu_lock, msg_lock = False, ""
             if type_cmd == "Sur Place":
                 if not table_selectionnee_id:
-                    menu_lock = True; msg_lock = "⚠️ Veuillez sélectionner une Table ci-dessus pour ouvrir le menu."
+                    menu_lock = True; msg_lock = "⚠️ Veuillez sélectionner une Table à gauche pour ouvrir le menu."
                 else:
                     cursor.execute("SELECT id FROM Commandes WHERE table_id = ? AND statut = 'En attente'", (table_selectionnee_id,))
                     cmd_existante = cursor.fetchone()
@@ -1830,14 +1839,77 @@ elif menu == "Prise de Commande":
                         menu_lock = True; msg_lock = f"⚠️ La table est occupée (Ticket #{cmd_existante[0]}). Cliquez sur 'Charger le ticket' dans les informations pour y ajouter des articles."
             elif type_cmd == "Room Service":
                 if not chambre_selectionnee_id:
-                    menu_lock = True; msg_lock = "⚠️ Veuillez sélectionner une Chambre ci-dessus pour ouvrir le menu."
+                    menu_lock = True; msg_lock = "⚠️ Veuillez sélectionner une Chambre à gauche pour ouvrir le menu."
                 else:
                     cursor.execute("SELECT id FROM Commandes WHERE chambre_id = ? AND statut = 'En attente'", (chambre_selectionnee_id,))
                     cmd_existante = cursor.fetchone()
                     if cmd_existante and st.session_state.commande_id_en_cours != cmd_existante[0]:
                         menu_lock = True; msg_lock = f"⚠️ Un ticket est en cours pour cette chambre (#{cmd_existante[0]}). Cliquez sur 'Charger le ticket' ci-dessus."
 
-            if menu_lock: st.error(msg_lock)
+            if menu_lock: 
+                st.error(msg_lock)
+                st.markdown("---")
+                st.markdown("### 🟢 Tables Occupées & Tickets en cours")
+                
+                cursor.execute("""
+                    SELECT c.id, c.type_commande, c.total, t.numero_table, ch.numero_chambre, COALESCE(cl.nom, c.nom_client), s.nom
+                    FROM Commandes c
+                    LEFT JOIN Tables_Resto t ON c.table_id = t.id
+                    LEFT JOIN Salles s ON t.salle_id = s.id
+                    LEFT JOIN Chambres_Hotel ch ON c.chambre_id = ch.id
+                    LEFT JOIN Clients cl ON c.client_id = cl.id
+                    WHERE c.statut = 'En attente'
+                    ORDER BY c.date_creation DESC
+                """)
+                open_tickets = cursor.fetchall()
+                
+                if open_tickets:
+                    cols_open = st.columns(3)
+                    for idx, (c_id_att, t_cmd, tot, num_t, num_ch, n_cli, nom_s) in enumerate(open_tickets):
+                        with cols_open[idx % 3]:
+                            btn_label = f"Ticket #{c_id_att} - {t_cmd}\n"
+                            if num_t: btn_label += f"🪑 {nom_s} : {num_t}\n"
+                            elif num_ch: btn_label += f"🛏️ Ch. {num_ch}\n"
+                            elif n_cli: btn_label += f"👤 {n_cli}\n"
+                            btn_label += f"💰 {fmt_prix(tot)} F"
+                            
+                            if st.button(btn_label, key=f"open_att_{c_id_att}", use_container_width=True):
+                                st.session_state.commande_id_en_cours = c_id_att
+                                st.session_state.paiements_partiels = []
+                                st.session_state.pourboire_ticket = 0.0
+                                
+                                cursor.execute("SELECT table_id, chambre_id, type_commande, client_id FROM Commandes WHERE id = ?", (c_id_att,))
+                                ctx = cursor.fetchone()
+                                if ctx:
+                                    st.session_state.table_active = ctx[0]
+                                    st.session_state.chambre_active = ctx[1]
+                                    st.session_state.radio_type_cmd = ctx[2]
+                                    cli_id_att = ctx[3]
+                                    if cli_id_att:
+                                        cursor.execute("SELECT id, nom, telephone FROM Clients WHERE id = ?", (cli_id_att,))
+                                        cli_res = cursor.fetchone()
+                                        if cli_res: st.session_state.active_client_name = f"CLI-{cli_res[0]:04d} : {cli_res[1]} ({cli_res[2]})"
+                                        else: st.session_state.active_client_name = "Passager (Anonyme)"
+                                    else:
+                                        st.session_state.active_client_name = "Passager (Anonyme)"
+                                
+                                df_lignes = pd.read_sql_query("SELECT lc.produit_id as id, p.nom, p.prix as prix_base, lc.prix_unitaire as prix, lc.quantite as qte, lc.quantite_envoyee, lc.quantite_offert_envoyee, lc.quantite_retour_envoyee FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id WHERE lc.commande_id = ?", conn, params=(c_id_att,))
+                                st.session_state.panier = {}
+                                for _, row in df_lignes.iterrows():
+                                    p_id, qte, prix_ligne, prix_b = int(row["id"]), int(row["qte"]), float(row["prix"]), float(row["prix_base"])
+                                    qte_env = int(row["quantite_envoyee"]) if not pd.isna(row.get("quantite_envoyee")) else 0
+                                    qte_off_env = int(row["quantite_offert_envoyee"]) if not pd.isna(row.get("quantite_offert_envoyee")) else 0
+                                    qte_ret_env = int(row["quantite_retour_envoyee"]) if not pd.isna(row.get("quantite_retour_envoyee")) else 0
+
+                                    if p_id not in st.session_state.panier: st.session_state.panier[p_id] = {"nom": row["nom"], "prix_base": prix_b, "qte": 0, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0}
+                                    if qte > 0:
+                                        if prix_ligne == 0: st.session_state.panier[p_id]["qte_offert"] += qte; st.session_state.panier[p_id]["qte_offert_envoyee"] += qte_off_env
+                                        else: st.session_state.panier[p_id]["qte"] += qte; st.session_state.panier[p_id]["qte_envoyee"] += qte_env
+                                    elif qte < 0: st.session_state.panier[p_id]["qte_retour"] += abs(qte); st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
+                                st.rerun()
+                else:
+                    st.info("Aucun ticket en attente actuellement. Sélectionnez une table à gauche pour ouvrir un nouveau ticket.")
+                    
             else:
                 st.markdown("#### 🍔 Menu & Produits")
                 
@@ -2089,14 +2161,12 @@ elif menu == "Prise de Commande":
                         if row["prix_unitaire"] == 0 and row["quantite"] > 0: qte_str = f"{fmt_qte(row['quantite'])}x {nom_plat} (Offert)"
                         elif row["quantite"] < 0: qte_str = f"{fmt_qte(row['quantite'])}x {nom_plat} (Annul.)"
                         else: qte_str = f"{fmt_qte(row['quantite'])}x {nom_plat}"
-                        
                         ticket_str += f"{qte_str}\n"
                         p_u_str = f"{fmt_prix(row['prix_unitaire'])} F"
                         s_t_str = f"{fmt_prix(row['sous_total'])} F"
                         ticket_str += f"{p_u_str:>20}{s_t_str:>22}\n"
 
                     ticket_str += "-" * 42 + "\n"
-                    
                     frais_liv = float(info_cmd['frais_livraison']) if info_cmd['frais_livraison'] else 0.0
                     total_cmd = float(info_cmd['total'])
                     
@@ -2121,12 +2191,10 @@ elif menu == "Prise de Commande":
                         total_paye_hist = df_paiements_detail['montant'].sum()
                         pourb = float(info_cmd.get('pourboire', 0.0)) if not pd.isna(info_cmd.get('pourboire')) else 0.0
                         rendu_monnaie_historique = max(0.0, total_paye_hist - total_cmd - pourb)
-                        
                         for _, p_row in df_paiements_detail.iterrows():
                             ticket_str += f"Reçu en {p_row['methode']} : {fmt_prix(p_row['montant'])} FCFA".rjust(42) + "\n"
                             
-                    if rendu_monnaie_historique > 0:
-                        ticket_str += f"MONNAIE RENDUE : {fmt_prix(rendu_monnaie_historique)} FCFA".rjust(42) + "\n"
+                    if rendu_monnaie_historique > 0: ticket_str += f"MONNAIE RENDUE : {fmt_prix(rendu_monnaie_historique)} FCFA".rjust(42) + "\n"
 
                     ticket_str += "\n"
                     ticket_str += f"{'=== MERCI DE VOTRE VISITE ===':^42}\n"
@@ -2134,8 +2202,7 @@ elif menu == "Prise de Commande":
                     if info_cmd['type_commande'] == "Room Service" or info_cmd['statut'] == "À Crédit" or info_cmd['methode_paiement'] in ["À Crédit", "Note de Chambre"]:
                         ticket_str += "\n"
                         ticket_str += f"{'(Signature)':>42}\n\n"
-                    else:
-                        ticket_str += "\n\n\n"
+                    else: ticket_str += "\n\n\n"
 
                     col_vue, col_print = st.columns([1, 1])
                     col_vue.code(ticket_str, language="text")
@@ -2148,13 +2215,6 @@ elif menu == "Prise de Commande":
                             if imprimer_ticket_windows(ticket_str, nom_fichier_export=nom_exp_dup, sous_dossier="tickets"): st.success("Impression lancée !")
                             else: st.error("Erreur d'impression.")
                     else:
-                        col_print.download_button(
-                            label="🖨️ Télécharger le Ticket",
-                            data=ticket_str.encode('utf-8-sig'),
-                            file_name=nom_exp_dup,
-                            mime="text/plain",
-                            type="primary",
-                            use_container_width=True
-                        )
+                        col_print.download_button(label="🖨️ Télécharger le Ticket", data=ticket_str.encode('utf-8-sig'), file_name=nom_exp_dup, mime="text/plain", type="primary", use_container_width=True)
 
 conn.close()
