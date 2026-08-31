@@ -1628,13 +1628,12 @@ elif menu == "Prise de Commande":
                                     tva_m = tot_prods - (tot_prods / (1 + float(params["tva"]) / 100))
                                     ticket_str += f"Dont TVA ({params['tva']}%) : {fmt_prix(tva_m)} FCFA".rjust(42) + "\n"
                                 ticket_str += f"FRAIS DE LIVRAISON : {fmt_prix(frais_livraison_actuel)} FCFA".rjust(42) + "\n"
-                                ticket_str += f"TOTAL : {fmt_prix(total_cmd)} FCFA".rjust(42) + "\n"
+                                ticket_str += f"TOTAL : {fmt_prix(total_commande)} FCFA".rjust(42) + "\n"
                             else:
-                                ticket_str += f"TOTAL : {fmt_prix(total_cmd)} FCFA".rjust(42) + "\n"
+                                ticket_str += f"TOTAL : {fmt_prix(total_commande)} FCFA".rjust(42) + "\n"
                                 if float(params["tva"]) > 0:
-                                    tva_m = total_cmd - (total_cmd / (1 + float(params["tva"]) / 100))
-                                    ticket_str += f"Dont TVA ({params['tva']}%) : {fmt_prix(tva_m)} FCFA".rjust(42) + "\n"
-                                    
+                                    tva_m = total_commande - (total_commande / (1 + float(params["tva"]) / 100))
+                                    ticket_str += f"Dont TVA ({params['tva']}%) : {fmt_prix(tva_m)} FCFA".rjust(42) + "\n"                                    
                             ticket_str += "-" * 42 + "\n"
                             
                             for pf in st.session_state.paiements_partiels:
