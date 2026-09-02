@@ -44,7 +44,15 @@ def force_db_update():
         CREATE TABLE IF NOT EXISTS Utilisateurs (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL UNIQUE, pin TEXT NOT NULL UNIQUE, role TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS Zones_Livraison (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, tarif REAL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS Fournisseurs (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, telephone TEXT, adresse TEXT);
+        CREATE TABLE IF NOT EXISTS Mouvements_Caisse (id INTEGER PRIMARY KEY AUTOINCREMENT, type_mouvement TEXT NOT NULL, motif TEXT NOT NULL, montant REAL NOT NULL, utilisateur_id INTEGER REFERENCES Utilisateurs(id), date_mvt TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
     """)
+
+    cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Depenses_Caisse'")
+    if cursor.fetchone()[0] == 1:
+        try:
+            cursor.execute("INSERT INTO Mouvements_Caisse (type_mouvement, motif, montant, utilisateur_id, date_mvt) SELECT 'Sortie', motif, montant, utilisateur_id, date_depense FROM Depenses_Caisse")
+            cursor.execute("DROP TABLE Depenses_Caisse")
+        except: pass
 
     cursor.execute("PRAGMA table_info(Produits)")
     colonnes_prod = [col[1] for col in cursor.fetchall()]
@@ -60,19 +68,12 @@ def force_db_update():
     if "sous_categorie_id" not in colonnes_prod: 
         cursor.execute("ALTER TABLE Produits ADD COLUMN sous_categorie_id INTEGER REFERENCES Sous_Categories(id)")
         cursor.execute("SELECT id FROM Categories")
-        cats = cursor.fetchall()
-        for cat in cats:
+        for cat in cursor.fetchall():
             c_id = cat[0]
             cursor.execute("SELECT id FROM Sous_Categories WHERE categorie_id=?", (c_id,))
             if not cursor.fetchone():
                 cursor.execute("INSERT INTO Sous_Categories (nom, categorie_id) VALUES ('Général', ?)", (c_id,))
         cursor.execute("UPDATE Produits SET sous_categorie_id = (SELECT id FROM Sous_Categories WHERE Sous_Categories.categorie_id = Produits.categorie_id LIMIT 1) WHERE sous_categorie_id IS NULL")
-
-    cursor.execute("PRAGMA table_info(Mouvements_Stock)")
-    cols_mvt = [c[1] for c in cursor.fetchall()]
-    if "fournisseur_id" not in cols_mvt: cursor.execute("ALTER TABLE Mouvements_Stock ADD COLUMN fournisseur_id INTEGER")
-    if "prix_unitaire" not in cols_mvt: cursor.execute("ALTER TABLE Mouvements_Stock ADD COLUMN prix_unitaire REAL DEFAULT 0")
-    if "valeur_totale" not in cols_mvt: cursor.execute("ALTER TABLE Mouvements_Stock ADD COLUMN valeur_totale REAL DEFAULT 0")
 
     cursor.execute("SELECT count(*) FROM Utilisateurs")
     if cursor.fetchone()[0] == 0: cursor.execute("INSERT INTO Utilisateurs (nom, pin, role) VALUES ('Admin', '1234', 'Manager')")
@@ -83,10 +84,6 @@ def force_db_update():
     cursor.execute("SELECT count(*) FROM Methodes_Paiement")
     if cursor.fetchone()[0] == 0:
         for m in ["Espèces", "Carte Bancaire", "Wave", "Orange Money", "Chèque", "À Crédit"]: cursor.execute("INSERT INTO Methodes_Paiement (nom) VALUES (?)", (m,))
-    else:
-        for m in ['À Crédit']:
-            cursor.execute("SELECT count(*) FROM Methodes_Paiement WHERE nom=?", (m,))
-            if cursor.fetchone()[0] == 0: cursor.execute("INSERT INTO Methodes_Paiement (nom) VALUES (?)", (m,))
 
     conn.commit()
     conn.close()
@@ -199,9 +196,9 @@ if st.sidebar.button("Se déconnecter"): st.session_state.utilisateur = None; st
 st.sidebar.divider()
 
 if role_actif == "Manager":
-    menu_options = ["Prise de Commande", "Tableau de Bord", "Achats (Fournisseurs)", "Catalogue Articles", "Stocks & Mouvements", "Clients (CRM)", "Paramètres", "Équipe (Utilisateurs)"]
+    menu_options = ["Prise de Commande", "Tableau de Bord", "Mouvements Caisse", "Achats (Fournisseurs)", "Catalogue Articles", "Stocks & Mouvements", "Clients (CRM)", "Paramètres", "Équipe (Utilisateurs)"]
 else:
-    menu_options = ["Prise de Commande", "Clients (CRM)"]
+    menu_options = ["Prise de Commande", "Mouvements Caisse", "Clients (CRM)"]
 
 menu = st.sidebar.radio("Navigation", menu_options)
 conn = get_connection()
@@ -255,29 +252,268 @@ if menu == "Équipe (Utilisateurs)":
                         if choix_u == "Admin": st.error("❌ Impossible de supprimer l'administrateur par défaut.")
                         else: cursor = conn.cursor(); cursor.execute("DELETE FROM Utilisateurs WHERE id = ?", (id_u,)); conn.commit(); st.rerun()
 
+elif menu == "Mouvements Caisse":
+    st.markdown("### 💸 Mouvements de Caisse")
+    col1, col2 = st.columns([1, 1.5])
+    
+    with col1:
+        st.info("💡 Enregistrez ici les entrées, sorties et le fond de caisse (monnaie) du tiroir.")
+        with st.form("form_mvt_caisse", clear_on_submit=True):
+            type_mvt = st.radio("Type d'opération", ["Fond de Caisse", "Entrée", "Sortie"])
+            motif = st.text_input("Motif (ex: Monnaie du matin, Facture d'eau...) *")
+            montant = st.number_input("Montant (FCFA) *", min_value=0.0, step=500.0)
+            if st.form_submit_button("Enregistrer le mouvement", type="primary"):
+                if motif and montant > 0:
+                    cursor = conn.cursor()
+                    cursor.execute("INSERT INTO Mouvements_Caisse (type_mouvement, motif, montant, utilisateur_id) VALUES (?, ?, ?, ?)", (type_mvt, motif, montant, st.session_state.utilisateur["id"]))
+                    conn.commit()
+                    st.success(f"{type_mvt} enregistré(e) avec succès !")
+                    st.rerun()
+                else:
+                    st.error("Veuillez saisir un motif et un montant valide.")
+
+    with col2:
+        aujourdhui_biz = (datetime.datetime.now() - datetime.timedelta(hours=sys_heure_fin)).date()
+        date_filtre_mvt = st.date_input("📅 Filtrer par date :", value=aujourdhui_biz)
+        
+        df_depenses = pd.read_sql_query("SELECT m.id, m.date_mvt, m.type_mouvement, m.motif, m.montant, u.nom as utilisateur FROM Mouvements_Caisse m LEFT JOIN Utilisateurs u ON m.utilisateur_id = u.id ORDER BY m.date_mvt DESC", conn)
+        
+        if not df_depenses.empty:
+            df_depenses['Date_Exploitation'] = (pd.to_datetime(df_depenses['date_mvt']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+            df_depenses_jour = df_depenses[df_depenses['Date_Exploitation'] == date_filtre_mvt]
+            
+            total_entrees = df_depenses_jour[df_depenses_jour['type_mouvement'] == 'Entrée']['montant'].sum()
+            total_sorties = df_depenses_jour[df_depenses_jour['type_mouvement'] == 'Sortie']['montant'].sum()
+            total_fond = df_depenses_jour[df_depenses_jour['type_mouvement'] == 'Fond de Caisse']['montant'].sum()
+            
+            st.markdown(f"#### Mouvements du {date_filtre_mvt.strftime('%d/%m/%Y')}")
+            
+            if not df_depenses_jour.empty:
+                df_aff = df_depenses_jour.drop(columns=['Date_Exploitation'])
+                df_aff['date_mvt'] = df_aff['date_mvt'].apply(fmt_date)
+                df_aff['montant'] = df_aff['montant'].apply(fmt_prix)
+                df_aff = df_aff.rename(columns={"date_mvt": "Date", "type_mouvement": "Type", "motif": "Motif", "montant": "Montant (FCFA)", "utilisateur": "Saisi par"})
+                
+                def color_mvt(val):
+                    if val == "Sortie": return "color: red;"
+                    elif val == "Entrée": return "color: green;"
+                    elif val == "Fond de Caisse": return "color: blue; font-weight: bold;"
+                    return ""
+                
+                st.dataframe(df_aff[['Date', 'Type', 'Motif', 'Montant (FCFA)', 'Saisi par']].style.map(color_mvt, subset=["Type"]), use_container_width=True, hide_index=True)
+                
+                col_exp_m1, col_exp_m2 = st.columns(2)
+                date_str_file = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+                
+                html_mvt = f"""
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <title>Mouvements de Caisse</title>
+                    <style>
+                        body {{ font-family: sans-serif; margin: 20px; }}
+                        h2 {{ text-align: center; color: #333; border-bottom: 2px solid #000; padding-bottom: 10px; }}
+                        .summary {{ text-align: center; margin-bottom: 20px; font-size: 1.1em; font-weight: bold; color: #0288d1; }}
+                        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+                        th, td {{ border: 1px solid #aaa; padding: 8px; text-align: left; font-size: 14px; }}
+                        th {{ background: #eee; font-weight: bold; }}
+                        @media print {{ button {{ display: none; }} }}
+                    </style>
+                </head>
+                <body>
+                    <h2>Mouvements de Caisse - {date_filtre_mvt.strftime('%d/%m/%Y')}</h2>
+                    <div class="summary">Fond de Caisse: {fmt_prix(total_fond)} F | Entrées: {fmt_prix(total_entrees)} F | Sorties: {fmt_prix(total_sorties)} F</div>
+                    <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter en PDF / Imprimer</button>
+                    {df_aff[['Date', 'Type', 'Motif', 'Montant (FCFA)', 'Saisi par']].to_html(index=False)}
+                </body>
+                </html>
+                """
+                col_exp_m2.download_button(label="🖨️ Exporter en PDF / Imprimer", data=html_mvt, file_name=f"Mouvements_{date_filtre_mvt.strftime('%Y%m%d')}.html", mime="text/html", use_container_width=True)
+                
+                with st.expander("🗑️ Annuler un mouvement (Erreur de saisie)"):
+                    dict_del = {f"[{row['Type']}] {row['Motif']} - {row['Montant (FCFA)']} (ID: {row['id']})": row['id'] for _, row in df_aff.iterrows()}
+                    choix_del = st.selectbox("Sélectionnez le mouvement à annuler :", options=list(dict_del.keys()))
+                    if st.button("❌ Confirmer l'annulation"):
+                        cursor = conn.cursor()
+                        cursor.execute("DELETE FROM Mouvements_Caisse WHERE id = ?", (dict_del[choix_del],))
+                        conn.commit()
+                        st.success("Mouvement annulé !")
+                        st.rerun()
+            else:
+                st.info("Aucun mouvement enregistré pour cette date.")
+        else:
+            st.info("Aucun mouvement dans l'historique.")
+
 elif menu == "Tableau de Bord":
-    st.markdown("### 📊 Tableau de Bord")
+    st.markdown("### 📊 Z de Caisse & Tableau de Bord")
     aujourdhui_biz = (datetime.datetime.now() - datetime.timedelta(hours=sys_heure_fin)).date()
-    col1, col2, col3 = st.columns(3)
-    df_cmd = pd.read_sql_query("SELECT id, COALESCE(date_paiement, date_creation) as date_calc, pourboire FROM Commandes WHERE statut IN ('Payée', 'À Crédit')", conn)
-    if not df_cmd.empty:
-        df_cmd['Date_Exploitation'] = (pd.to_datetime(df_cmd['date_calc']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
-        df_today_cmd = df_cmd[df_cmd['Date_Exploitation'] == aujourdhui_biz]
-        nb_cmd = len(df_today_cmd)
-        pourboires_total = df_today_cmd['pourboire'].sum()
-    else: nb_cmd, pourboires_total = 0, 0.0
+    
+    df_mvt = pd.read_sql_query("SELECT type_mouvement, montant, date_mvt FROM Mouvements_Caisse", conn)
+    if not df_mvt.empty:
+        df_mvt['Date_Exploitation'] = (pd.to_datetime(df_mvt['date_mvt']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+        df_mvt_today = df_mvt[df_mvt['Date_Exploitation'] == aujourdhui_biz]
+        fond_caisse = df_mvt_today[df_mvt_today['type_mouvement'] == 'Fond de Caisse']['montant'].sum()
+        entrees_mvt = df_mvt_today[df_mvt_today['type_mouvement'] == 'Entrée']['montant'].sum()
+        sorties_mvt = df_mvt_today[df_mvt_today['type_mouvement'] == 'Sortie']['montant'].sum()
+    else:
+        fond_caisse, entrees_mvt, sorties_mvt = 0.0, 0.0, 0.0
         
-    df_paies = pd.read_sql_query("SELECT montant, methode, date_paiement FROM Paiements_Ticket", conn)
+    df_paies = pd.read_sql_query("""
+        SELECT p.montant, p.methode, p.date_paiement, c.date_creation 
+        FROM Paiements_Ticket p JOIN Commandes c ON p.commande_id = c.id
+        WHERE p.methode NOT IN ('À Crédit', 'Note de Chambre')
+    """, conn)
+    
+    df_cmd = pd.read_sql_query("SELECT id, total, pourboire, date_creation FROM Commandes", conn)
+    
+    ventes_especes_jour = 0.0
+    reglements_anciens_especes = 0.0
+    autres_paies_jour = 0.0
+    paies_tickets_du_jour_total = 0.0
+    html_autres_paies = ""
+    
     if not df_paies.empty:
-        df_paies['Date_Exploitation'] = (pd.to_datetime(df_paies['date_paiement']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
-        df_today_paies = df_paies[df_paies['Date_Exploitation'] == aujourdhui_biz]
-        real_money = df_today_paies[~df_today_paies['methode'].isin(['À Crédit'])]
-        ca_total = real_money['montant'].sum()
-    else: ca_total = 0.0
+        df_paies['Date_Paie'] = (pd.to_datetime(df_paies['date_paiement']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+        df_paies['Date_Cmd'] = (pd.to_datetime(df_paies['date_creation']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+        paies_today = df_paies[df_paies['Date_Paie'] == aujourdhui_biz]
         
-    col1.metric("Commandes (Journée en cours)", f"{nb_cmd}")
-    col2.metric("Chiffre d'Affaires Réel", f"{fmt_prix(ca_total)} FCFA")
-    col3.metric("Pourboires", f"{fmt_prix(pourboires_total)} FCFA")
+        ventes_especes_jour = paies_today[(paies_today['methode'] == 'Espèces') & (paies_today['Date_Cmd'] == aujourdhui_biz)]['montant'].sum()
+        reglements_anciens_especes = paies_today[(paies_today['methode'] == 'Espèces') & (paies_today['Date_Cmd'] < aujourdhui_biz)]['montant'].sum()
+        
+        df_autres = paies_today[paies_today['methode'] != 'Espèces']
+        autres_paies_jour = df_autres['montant'].sum()
+        paies_tickets_du_jour_total = paies_today[paies_today['Date_Cmd'] == aujourdhui_biz]['montant'].sum()
+        
+        if not df_autres.empty:
+            for methode, group in df_autres.groupby('methode'):
+                html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">↳ {methode}</span><span>{fmt_prix(group["montant"].sum())} F</span></div>'
+
+    if html_autres_paies == "":
+        html_autres_paies = f'<div class="line"><span style="padding-left: 20px; color: #555;">↳ Aucun</span><span>0 F</span></div>'
+
+    if not df_cmd.empty:
+        df_cmd['Date_Exploitation'] = (pd.to_datetime(df_cmd['date_creation']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+        cmd_today = df_cmd[df_cmd['Date_Exploitation'] == aujourdhui_biz]
+        ca_brut_ttc = cmd_today['total'].sum()
+        pourboires = cmd_today['pourboire'].sum()
+        nb_tickets = len(cmd_today)
+    else:
+        ca_brut_ttc, pourboires, nb_tickets = 0.0, 0.0, 0
+        
+    credits_du_jour = max(0.0, ca_brut_ttc - paies_tickets_du_jour_total)
+    total_especes_attendu = fond_caisse + entrees_mvt + ventes_especes_jour + reglements_anciens_especes - sorties_mvt
+    
+    st.markdown("#### 💵 TIROIR-CAISSE (État des espèces)")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.write(f"**➕ Fond de Caisse :** {fmt_prix(fond_caisse)} F")
+        st.write(f"**➕ Entrées Diverses :** {fmt_prix(entrees_mvt)} F")
+    with c2:
+        st.write(f"**➕ Ventes Espèces (Jour) :** {fmt_prix(ventes_especes_jour)} F")
+        st.write(f"**➕ Règlements (Anciens Crédits) :** {fmt_prix(reglements_anciens_especes)} F")
+    with c3:
+        st.write(f"**➖ Sorties (Dépenses) :** - {fmt_prix(sorties_mvt)} F")
+        st.markdown(f"<h3 style='color:#0288d1; margin-top:5px;'>= TOTAL ESPÈCES : {fmt_prix(total_especes_attendu)} F</h3>", unsafe_allow_html=True)
+        
+    st.divider()
+    st.markdown("#### 📈 PERFORMANCES DU JOUR (Chiffre d'Affaires & Créances)")
+    cc1, cc2, cc3, cc4 = st.columns(4)
+    cc1.metric("CA Réalisé (TTC)", f"{fmt_prix(ca_brut_ttc)} F")
+    cc2.metric("Encaissé Autre", f"{fmt_prix(autres_paies_jour)} F")
+    cc3.metric("Tickets à Crédit (Jour)", f"{fmt_prix(credits_du_jour)} F")
+    cc4.metric("Pourboires", f"{fmt_prix(pourboires)} F")
+    
+    st.divider()
+    
+    df_tous_tickets = pd.read_sql_query("SELECT id as 'N°', date_creation as 'Heure', type_commande as 'Type', statut as 'Statut', COALESCE(methode_paiement, '-') as 'Paiement', total as 'Total (FCFA)' FROM Commandes ORDER BY id DESC", conn)
+    df_tous_tickets['Date_Exploitation'] = (pd.to_datetime(df_tous_tickets['Heure']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+    tickets_du_jour = df_tous_tickets[df_tous_tickets['Date_Exploitation'] == aujourdhui_biz].copy()
+    
+    if not tickets_du_jour.empty:
+        tickets_du_jour['Heure'] = pd.to_datetime(tickets_du_jour['Heure']).dt.strftime('%H:%M')
+        tickets_du_jour['Total (FCFA)'] = tickets_du_jour['Total (FCFA)'].apply(fmt_prix)
+        html_tickets = tickets_du_jour.drop(columns=['Date_Exploitation']).to_html(index=False)
+    else:
+        html_tickets = "<p>Aucun ticket émis aujourd'hui.</p>"
+
+    html_z_caisse = f"""
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Z de Caisse</title>
+        <style>
+            body {{ font-family: sans-serif; margin: 20px; }}
+            h2 {{ text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; }}
+            .section {{ margin-top: 20px; }}
+            .line {{ display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dotted #ccc; }}
+            .total {{ font-weight: bold; font-size: 1.2em; border-top: 2px solid #000; padding-top: 10px; margin-top: 10px; }}
+            @media print {{ button {{ display: none; }} }}
+        </style>
+    </head>
+    <body>
+        <h2>Z DE CAISSE - {aujourdhui_biz.strftime('%d/%m/%Y')}</h2>
+        <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter PDF / Imprimer le Z</button>
+        
+        <div class="section">
+            <h3>1. TIROIR-CAISSE (ESPÈCES)</h3>
+            <div class="line"><span>Fond de Caisse (Matin)</span><span>{fmt_prix(fond_caisse)} F</span></div>
+            <div class="line"><span>Ventes en Espèces (Tickets du jour)</span><span>{fmt_prix(ventes_especes_jour)} F</span></div>
+            <div class="line"><span>Règlements d'anciens Crédits (Espèces)</span><span>{fmt_prix(reglements_anciens_especes)} F</span></div>
+            <div class="line"><span>Entrées Diverses</span><span>{fmt_prix(entrees_mvt)} F</span></div>
+            <div class="line"><span>Sorties / Dépenses Caisse</span><span>- {fmt_prix(sorties_mvt)} F</span></div>
+            <div class="line total"><span>TOTAL ESPÈCES ATTENDU</span><span>{fmt_prix(total_especes_attendu)} F</span></div>
+        </div>
+        
+        <div class="section">
+            <h3>2. CHIFFRE D'AFFAIRES & GESTION</h3>
+            <div class="line"><span>Chiffre d'Affaires Réalisé (TTC)</span><span>{fmt_prix(ca_brut_ttc)} F</span></div>
+            <div class="line"><span>Nombre de tickets émis</span><span>{nb_tickets}</span></div>
+            <div class="line"><span><strong>Paiements Numériques / Chèques</strong></span><span><strong>{fmt_prix(autres_paies_jour)} F</strong></span></div>
+            {html_autres_paies}
+            <div class="line"><span>Créances Client (Crédits générés ce jour)</span><span>{fmt_prix(credits_du_jour)} F</span></div>
+            <div class="line"><span>Pourboires enregistrés</span><span>{fmt_prix(pourboires)} F</span></div>
+        </div>
+    </body>
+    </html>
+    """
+
+    html_liste_tickets = f"""
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Liste des Tickets du Jour</title>
+        <style>
+            body {{ font-family: sans-serif; margin: 20px; }}
+            h2 {{ text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+            th, td {{ border: 1px solid #aaa; padding: 8px; text-align: left; font-size: 14px; }}
+            th {{ background: #eee; font-weight: bold; }}
+            @media print {{ button {{ display: none; }} }}
+        </style>
+    </head>
+    <body>
+        <h2>LISTE DES TICKETS - {aujourdhui_biz.strftime('%d/%m/%Y')}</h2>
+        <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter PDF / Imprimer la Liste</button>
+        {html_tickets}
+    </body>
+    </html>
+    """
+    
+    col_dlz, col_dlt, _ = st.columns([1.5, 1.5, 1])
+    col_dlz.download_button(
+        label="🖨️ Rapport Z de Caisse (PDF / Impression)", 
+        data=html_z_caisse, 
+        file_name=f"Z_Caisse_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')}.html", 
+        mime="text/html", 
+        use_container_width=True
+    )
+    col_dlt.download_button(
+        label="🧾 Liste des Tickets du Jour", 
+        data=html_liste_tickets, 
+        file_name=f"Tickets_Jour_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')}.html", 
+        mime="text/html", 
+        use_container_width=True
+    )
 
 elif menu == "Paramètres":
     st.markdown("### ⚙️ Paramètres du Système")
@@ -1396,9 +1632,6 @@ elif menu == "Prise de Commande":
                                         st.session_state.panier[p_id]["qte_retour"] += abs(qte)
                                         st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
                                         
-                                    st.session_state[f"in_qte_{p_id}"] = float(st.session_state.panier[p_id]["qte"])
-                                    st.session_state[f"in_qteo_{p_id}"] = float(st.session_state.panier[p_id]["qte_offert"])
-                                    st.session_state[f"in_qter_{p_id}"] = float(st.session_state.panier[p_id]["qte_retour"])
                                 st.rerun()
                         else: 
                             st.session_state.commande_id_en_cours = None
@@ -1429,12 +1662,9 @@ elif menu == "Prise de Commande":
                         if c_off.button("🎁", key=f"off_{p_id}", help="Offrir", use_container_width=True): 
                             item["qte_offert"] += 1
                             item["qte"] = max(0, item["qte"] - 1)
-                            st.session_state[f"in_qteo_{p_id}"] = float(item["qte_offert"])
-                            st.session_state[f"in_qte_{p_id}"] = float(item["qte"])
                             st.rerun()
                         if c_ret.button("➖", key=f"ret_{p_id}", use_container_width=True): 
                             item["qte_retour"] += 1
-                            st.session_state[f"in_qter_{p_id}"] = float(item["qte_retour"])
                             st.rerun()
                             
                         key_qte = f"in_qte_{p_id}_{item['qte']}"
@@ -1445,12 +1675,10 @@ elif menu == "Prise de Commande":
                             
                         if c_plus.button("➕", key=f"add_{p_id}", use_container_width=True): 
                             item["qte"] += 1
-                            st.session_state[f"in_qte_{p_id}"] = float(item["qte"])
                             st.rerun()
                             
                         if c_del.button("🗑️", key=f"del_{p_id}", use_container_width=True): 
                             item["qte"] = 0
-                            st.session_state[f"in_qte_{p_id}"] = 0.0
                             st.rerun()
                             
                         c_prix.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>{fmt_prix(sous_total)} F</div>", unsafe_allow_html=True)
@@ -1461,7 +1689,6 @@ elif menu == "Prise de Commande":
                         c_off_o.write("")
                         if c_ret_o.button("➖", key=f"sub_o_{p_id}", use_container_width=True): 
                             item["qte_offert"] = max(0, item["qte_offert"] - 1)
-                            st.session_state[f"in_qteo_{p_id}"] = float(item["qte_offert"])
                             st.rerun()
                             
                         key_qteo = f"in_qteo_{p_id}_{item['qte_offert']}"
@@ -1472,11 +1699,9 @@ elif menu == "Prise de Commande":
                             
                         if c_plus_o.button("➕", key=f"add_o_{p_id}", use_container_width=True): 
                             item["qte_offert"] += 1
-                            st.session_state[f"in_qteo_{p_id}"] = float(item["qte_offert"])
                             st.rerun()
                         if c_del_o.button("🗑️", key=f"del_o_{p_id}", use_container_width=True): 
                             item["qte_offert"] = 0
-                            st.session_state[f"in_qteo_{p_id}"] = 0.0
                             st.rerun()
                         c_prix_o.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>0 F</div>", unsafe_allow_html=True)
 
@@ -1488,7 +1713,6 @@ elif menu == "Prise de Commande":
                         c_off_r.write("")
                         if c_ret_r.button("➖", key=f"add_r_{p_id}", use_container_width=True): 
                             item["qte_retour"] += 1
-                            st.session_state[f"in_qter_{p_id}"] = float(item["qte_retour"])
                             st.rerun()
                             
                         key_qter = f"in_qter_{p_id}_{item['qte_retour']}"
@@ -1499,11 +1723,9 @@ elif menu == "Prise de Commande":
                             
                         if c_plus_r.button("➕", key=f"sub_r_{p_id}", use_container_width=True): 
                             item["qte_retour"] = max(0, item["qte_retour"] - 1)
-                            st.session_state[f"in_qter_{p_id}"] = float(item["qte_retour"])
                             st.rerun()
                         if c_del_r.button("🗑️", key=f"del_r_{p_id}", use_container_width=True): 
                             item["qte_retour"] = 0
-                            st.session_state[f"in_qter_{p_id}"] = 0.0
                             st.rerun()
                         c_prix_r.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>{fmt_prix(sous_total_ret)} F</div>", unsafe_allow_html=True)
 
@@ -1840,7 +2062,7 @@ elif menu == "Prise de Commande":
                             row_prod = df_all_prods[df_all_prods['id'] == p_id].iloc[0]
                             if p_id in st.session_state.panier: 
                                 st.session_state.panier[p_id]["qte"] += 1
-                                st.session_state[f"in_qte_{p_id}_{st.session_state.panier[p_id]['qte'] - 1}"] = float(st.session_state.panier[p_id]["qte"])
+                                st.session_state[f"in_qte_{p_id}"] = float(st.session_state.panier[p_id]["qte"])
                             else: 
                                 st.session_state.panier[p_id] = {"nom": row_prod["nom"], "prix_base": float(row_prod["prix"]), "qte": 1, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row_prod["applique_tva"]), "tva_rate": float(row_prod["tva_rate"])}
                             st.rerun()
