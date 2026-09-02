@@ -635,10 +635,17 @@ elif menu == "Catalogue Articles":
         
         if not df_menu.empty:
             col_f1, col_f2 = st.columns(2)
-            f_cat = col_f1.selectbox("Filtrer par Catégorie :", ["Toutes"] + list(df_menu["Catégorie"].unique()))
+            f_cat = col_f1.selectbox("Filtrer par Catégorie :", ["Toutes"] + sorted(list(df_menu["Catégorie"].unique())))
+            
+            scat_opts = ["Toutes"] + sorted(list(df_menu[df_menu["Catégorie"] == f_cat]["Sous-Catégorie"].unique())) if f_cat != "Toutes" else ["Toutes"] + sorted(list(df_menu["Sous-Catégorie"].unique()))
+            f_scat = col_f2.selectbox("Filtrer par Sous-Catégorie :", scat_opts)
+            
             df_filtre = df_menu.copy()
             if f_cat != "Toutes": df_filtre = df_filtre[df_filtre["Catégorie"] == f_cat]
+            if f_scat != "Toutes": df_filtre = df_filtre[df_filtre["Sous-Catégorie"] == f_scat]
+            
             st.dataframe(df_filtre, use_container_width=True, hide_index=True)
+            st.download_button(label="📥 Exporter vers Excel", data=convert_df_to_csv(df_filtre), file_name=f"Catalogue_{datetime.datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")
             
     with tab_import:
         st.markdown("### 📥 Import / Export du Catalogue (Excel / CSV)")
@@ -1019,28 +1026,51 @@ elif menu == "Stocks & Mouvements":
                         conn.commit(); st.success(f"Mouvement enregistré !"); st.rerun()
 
     with tab_hist_stock:
-        df_hist_stock = pd.read_sql_query("SELECT m.date_mvt as 'Date', p.nom as 'Produit', d.nom as 'Dépôt', m.type_mouvement as 'Type', m.quantite as 'Qté', m.reference as 'Référence' FROM Mouvements_Stock m JOIN Produits p ON m.produit_id = p.id JOIN Depots d ON m.depot_id = d.id ORDER BY m.date_mvt DESC LIMIT 1000", conn)
+        df_hist_stock = pd.read_sql_query("""
+            SELECT m.date_mvt as 'Date', p.nom as 'Produit', c.nom as 'Catégorie', COALESCE(sc.nom, 'Général') as 'Sous-Catégorie', d.nom as 'Dépôt', m.type_mouvement as 'Type', m.quantite as 'Qté', m.reference as 'Référence' 
+            FROM Mouvements_Stock m 
+            JOIN Produits p ON m.produit_id = p.id 
+            JOIN Categories c ON p.categorie_id = c.id
+            LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id
+            JOIN Depots d ON m.depot_id = d.id 
+            ORDER BY m.date_mvt DESC LIMIT 1000
+        """, conn)
+        
         if not df_hist_stock.empty:
             df_hist_stock['Date_Real'] = pd.to_datetime(df_hist_stock['Date'])
             df_hist_stock['Date_Exploitation'] = (df_hist_stock['Date_Real'] - pd.Timedelta(hours=sys_heure_fin)).dt.date
             dates_dispos = ["Toutes"] + list(df_hist_stock['Date_Exploitation'].unique())
+            
             c_f1, c_f2, c_f3 = st.columns(3)
+            c_f4, c_f5 = st.columns(2)
+            
             f_date = c_f1.selectbox("Date :", dates_dispos)
-            f_prod = c_f2.selectbox("Produit :", ["Tous"] + sorted(list(df_hist_stock["Produit"].unique())))
-            f_type = c_f3.selectbox("Type :", ["Tous"] + sorted(list(df_hist_stock["Type"].unique())))
+            f_type = c_f2.selectbox("Type :", ["Tous"] + sorted(list(df_hist_stock["Type"].unique())))
+            f_cat = c_f3.selectbox("Catégorie :", ["Toutes"] + sorted(list(df_hist_stock["Catégorie"].unique())))
+            
+            scat_opts = ["Toutes"] + sorted(list(df_hist_stock[df_hist_stock["Catégorie"] == f_cat]["Sous-Catégorie"].unique())) if f_cat != "Toutes" else ["Toutes"] + sorted(list(df_hist_stock["Sous-Catégorie"].unique()))
+            f_scat = c_f4.selectbox("Sous-Catégorie :", scat_opts)
+            
+            prod_opts = ["Tous"] + sorted(list(df_hist_stock["Produit"].unique()))
+            f_prod = c_f5.selectbox("Produit :", prod_opts)
             
             df_filtre = df_hist_stock.copy()
             if f_date != "Toutes": df_filtre = df_filtre[df_filtre["Date_Exploitation"] == f_date]
             if f_prod != "Tous": df_filtre = df_filtre[df_filtre["Produit"] == f_prod]
             if f_type != "Tous": df_filtre = df_filtre[df_filtre["Type"] == f_type]
+            if f_cat != "Toutes": df_filtre = df_filtre[df_filtre["Catégorie"] == f_cat]
+            if f_scat != "Toutes": df_filtre = df_filtre[df_filtre["Sous-Catégorie"] == f_scat]
             
             df_afficher = df_filtre.drop(columns=["Date_Real", "Date_Exploitation"], errors='ignore')
             df_afficher['Date'] = df_afficher['Date'].apply(fmt_date)
             df_afficher['Qté'] = df_afficher['Qté'].apply(fmt_qte)
             st.dataframe(df_afficher, use_container_width=True, hide_index=True)
             
+            date_str_file_mvt = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            date_str_display_mvt = datetime.datetime.now().strftime(sys_format_date)
+
             col_export1, col_export2 = st.columns(2)
-            col_export1.download_button(label="📥 Exporter en CSV (Excel)", data=convert_df_to_csv(df_afficher), file_name="Journal_Mouvements.csv", mime="text/csv", use_container_width=True)
+            col_export1.download_button(label="📥 Exporter en CSV (Excel)", data=convert_df_to_csv(df_afficher), file_name=f"Journal_Mouvements_{date_str_file_mvt}.csv", mime="text/csv", use_container_width=True)
             
             html_report = f"""
             <html>
@@ -1057,32 +1087,36 @@ elif menu == "Stocks & Mouvements":
                 </style>
             </head>
             <body>
-                <h2>Journal des Mouvements - Etat du {datetime.datetime.now().strftime(sys_format_date)}</h2>
+                <h2>Journal des Mouvements - Édité le {date_str_display_mvt}</h2>
                 <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter en PDF / Imprimer (Version HTML)</button>
                 {df_afficher.to_html(index=False)}
             </body>
             </html>
             """
-            col_export2.download_button(label="🖨️ Exporter en PDF / Imprimer (Version HTML)", data=html_report, file_name="Journal_Mouvements_Impression.html", mime="text/html", use_container_width=True)
+            col_export2.download_button(label="🖨️ Exporter en PDF / Imprimer (Version HTML)", data=html_report, file_name=f"Journal_Mouvements_{date_str_file_mvt}.html", mime="text/html", use_container_width=True)
 
     with tab_etat:
         st.info("💡 Les quantités affichées concernent uniquement les unités de base (les conditionnements sont automatiquement convertis en unités lors des transactions).")
         df_etat_stock = pd.read_sql_query("""
-            SELECT d.nom as 'Dépôt', p.nom as 'Article (Base)', p.unite_vente as 'Unité', c.nom as 'Catégorie', s.quantite as 'En Stock' 
-            FROM Stock_Plats s JOIN Produits p ON s.produit_id = p.id JOIN Categories c ON p.categorie_id = c.id JOIN Depots d ON s.depot_id = d.id 
-            WHERE p.composition_id IS NULL ORDER BY d.nom, c.nom, p.nom
+            SELECT d.nom as 'Dépôt', p.nom as 'Article (Base)', p.unite_vente as 'Unité', c.nom as 'Catégorie', COALESCE(sc.nom, 'Général') as 'Sous-Catégorie', s.quantite as 'En Stock' 
+            FROM Stock_Plats s JOIN Produits p ON s.produit_id = p.id JOIN Categories c ON p.categorie_id = c.id LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id JOIN Depots d ON s.depot_id = d.id 
+            WHERE p.composition_id IS NULL ORDER BY d.nom, c.nom, COALESCE(sc.nom, 'Général'), p.nom
         """, conn)
         
         if not df_etat_stock.empty:
             df_etat_stock['En Stock Brut'] = df_etat_stock['En Stock'] 
             df_etat_stock['En Stock'] = df_etat_stock['En Stock'].apply(fmt_qte)
             
+            col_e1, col_e2 = st.columns(2)
             categories_dispo = ["Toutes"] + sorted(list(df_etat_stock["Catégorie"].unique()))
-            f_cat_etat = st.selectbox("Filtrer par Famille (Catégorie) :", categories_dispo)
+            f_cat_etat = col_e1.selectbox("Filtrer par Catégorie :", categories_dispo)
+            
+            scat_opts_etat = ["Toutes"] + sorted(list(df_etat_stock[df_etat_stock["Catégorie"] == f_cat_etat]["Sous-Catégorie"].unique())) if f_cat_etat != "Toutes" else ["Toutes"] + sorted(list(df_etat_stock["Sous-Catégorie"].unique()))
+            f_scat_etat = col_e2.selectbox("Filtrer par Sous-Catégorie :", scat_opts_etat)
             
             df_filtre_etat = df_etat_stock.copy()
-            if f_cat_etat != "Toutes":
-                df_filtre_etat = df_filtre_etat[df_filtre_etat["Catégorie"] == f_cat_etat]
+            if f_cat_etat != "Toutes": df_filtre_etat = df_filtre_etat[df_filtre_etat["Catégorie"] == f_cat_etat]
+            if f_scat_etat != "Toutes": df_filtre_etat = df_filtre_etat[df_filtre_etat["Sous-Catégorie"] == f_scat_etat]
                 
             st.dataframe(df_filtre_etat.drop(columns=["En Stock Brut"], errors="ignore"), use_container_width=True, hide_index=True)
             
@@ -1362,6 +1396,9 @@ elif menu == "Prise de Commande":
                                         st.session_state.panier[p_id]["qte_retour"] += abs(qte)
                                         st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
                                         
+                                    st.session_state[f"in_qte_{p_id}"] = float(st.session_state.panier[p_id]["qte"])
+                                    st.session_state[f"in_qteo_{p_id}"] = float(st.session_state.panier[p_id]["qte_offert"])
+                                    st.session_state[f"in_qter_{p_id}"] = float(st.session_state.panier[p_id]["qte_retour"])
                                 st.rerun()
                         else: 
                             st.session_state.commande_id_en_cours = None
@@ -1392,9 +1429,12 @@ elif menu == "Prise de Commande":
                         if c_off.button("🎁", key=f"off_{p_id}", help="Offrir", use_container_width=True): 
                             item["qte_offert"] += 1
                             item["qte"] = max(0, item["qte"] - 1)
+                            st.session_state[f"in_qteo_{p_id}"] = float(item["qte_offert"])
+                            st.session_state[f"in_qte_{p_id}"] = float(item["qte"])
                             st.rerun()
                         if c_ret.button("➖", key=f"ret_{p_id}", use_container_width=True): 
                             item["qte_retour"] += 1
+                            st.session_state[f"in_qter_{p_id}"] = float(item["qte_retour"])
                             st.rerun()
                             
                         key_qte = f"in_qte_{p_id}_{item['qte']}"
@@ -1405,10 +1445,12 @@ elif menu == "Prise de Commande":
                             
                         if c_plus.button("➕", key=f"add_{p_id}", use_container_width=True): 
                             item["qte"] += 1
+                            st.session_state[f"in_qte_{p_id}"] = float(item["qte"])
                             st.rerun()
                             
                         if c_del.button("🗑️", key=f"del_{p_id}", use_container_width=True): 
                             item["qte"] = 0
+                            st.session_state[f"in_qte_{p_id}"] = 0.0
                             st.rerun()
                             
                         c_prix.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>{fmt_prix(sous_total)} F</div>", unsafe_allow_html=True)
@@ -1419,6 +1461,7 @@ elif menu == "Prise de Commande":
                         c_off_o.write("")
                         if c_ret_o.button("➖", key=f"sub_o_{p_id}", use_container_width=True): 
                             item["qte_offert"] = max(0, item["qte_offert"] - 1)
+                            st.session_state[f"in_qteo_{p_id}"] = float(item["qte_offert"])
                             st.rerun()
                             
                         key_qteo = f"in_qteo_{p_id}_{item['qte_offert']}"
@@ -1429,9 +1472,11 @@ elif menu == "Prise de Commande":
                             
                         if c_plus_o.button("➕", key=f"add_o_{p_id}", use_container_width=True): 
                             item["qte_offert"] += 1
+                            st.session_state[f"in_qteo_{p_id}"] = float(item["qte_offert"])
                             st.rerun()
                         if c_del_o.button("🗑️", key=f"del_o_{p_id}", use_container_width=True): 
                             item["qte_offert"] = 0
+                            st.session_state[f"in_qteo_{p_id}"] = 0.0
                             st.rerun()
                         c_prix_o.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>0 F</div>", unsafe_allow_html=True)
 
@@ -1443,6 +1488,7 @@ elif menu == "Prise de Commande":
                         c_off_r.write("")
                         if c_ret_r.button("➖", key=f"add_r_{p_id}", use_container_width=True): 
                             item["qte_retour"] += 1
+                            st.session_state[f"in_qter_{p_id}"] = float(item["qte_retour"])
                             st.rerun()
                             
                         key_qter = f"in_qter_{p_id}_{item['qte_retour']}"
@@ -1453,9 +1499,11 @@ elif menu == "Prise de Commande":
                             
                         if c_plus_r.button("➕", key=f"sub_r_{p_id}", use_container_width=True): 
                             item["qte_retour"] = max(0, item["qte_retour"] - 1)
+                            st.session_state[f"in_qter_{p_id}"] = float(item["qte_retour"])
                             st.rerun()
                         if c_del_r.button("🗑️", key=f"del_r_{p_id}", use_container_width=True): 
                             item["qte_retour"] = 0
+                            st.session_state[f"in_qter_{p_id}"] = 0.0
                             st.rerun()
                         c_prix_r.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>{fmt_prix(sous_total_ret)} F</div>", unsafe_allow_html=True)
 
@@ -1764,99 +1812,6 @@ elif menu == "Prise de Commande":
                         if statut_cmd == "À Crédit": st.success("Vente enregistrée en CRÉDIT. Allez dans l'Historique pour télécharger le ticket.")
                         else: st.success("Vente validée et stock mis à jour !")
                         st.rerun()
-                        
-            if st.button("🖨️ Enregistrer & Télécharger Bons de Préparation", type="secondary", use_container_width=True):
-                if choix_client == "+ Nouveau Client..." and client_tel:
-                    cursor.execute("SELECT id FROM Clients WHERE telephone = ?", (client_tel,))
-                    exists = cursor.fetchone()
-                    if not exists:
-                        cursor.execute("INSERT INTO Clients (nom, telephone, adresse, zone_id) VALUES (?, ?, ?, ?)", (client_nom, client_tel, client_adr, zone_id_selected))
-                        client_id_db = cursor.lastrowid
-                    else: 
-                        client_id_db = exists[0]
-
-                if st.session_state.commande_id_en_cours is None:
-                    cursor.execute("INSERT INTO Commandes (type_commande, statut, total, pourboire, nom_client, telephone, adresse, client_id, utilisateur_id, zone_id, frais_livraison) VALUES (?, 'En attente', ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
-                    cmd_id = cursor.lastrowid
-                else:
-                    cmd_id = st.session_state.commande_id_en_cours
-                    cursor.execute("UPDATE Commandes SET total = ?, pourboire = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ? WHERE id = ?", (total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, cmd_id))
-                    cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (cmd_id,))
-
-                bons_par_depot = {}
-                for p_id, item in st.session_state.panier.items():
-                    qte_nouvelle = item["qte"] - item.get("qte_envoyee", 0)
-                    qte_off_nouvelle = item.get("qte_offert", 0) - item.get("qte_offert_envoyee", 0)
-                    qte_ret_nouvelle = item.get("qte_retour", 0) - item.get("qte_retour_envoyee", 0)
-                    qte_totale_print = qte_nouvelle + qte_off_nouvelle
-                    if qte_totale_print > 0 or qte_ret_nouvelle > 0:
-                        cursor.execute("SELECT d.nom FROM Produits p LEFT JOIN Depots d ON p.depot_id = d.id WHERE p.id = ?", (p_id,))
-                        d_res = cursor.fetchone()
-                        depot_name = d_res[0] if (d_res and d_res[0]) else "GENERAL"
-                        if depot_name not in bons_par_depot: 
-                            bons_par_depot[depot_name] = []
-                        bons_par_depot[depot_name].append({"nom": item["nom"], "qte_a_imprimer": qte_totale_print, "qte_retour": qte_ret_nouvelle})
-
-                for p_id in st.session_state.panier:
-                    st.session_state.panier[p_id]["qte_envoyee"] = st.session_state.panier[p_id]["qte"]
-                    st.session_state.panier[p_id]["qte_offert_envoyee"] = st.session_state.panier[p_id].get("qte_offert", 0)
-                    st.session_state.panier[p_id]["qte_retour_envoyee"] = st.session_state.panier[p_id].get("qte_retour", 0)
-
-                for p_id, item in st.session_state.panier.items():
-                    if item["qte"] > 0: 
-                        cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (cmd_id, p_id, item["qte"], item["prix_base"], item["prix_base"] * item["qte"], item.get("qte_envoyee", 0), item.get("qte_offert_envoyee", 0), 0))
-                    if item.get("qte_offert", 0) > 0: 
-                        cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, 0.0, 0.0, 0, ?, 0)", (cmd_id, p_id, item["qte_offert"], item.get("qte_offert_envoyee", 0)))
-                    if item.get("qte_retour", 0) > 0: 
-                        cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, 0, 0, ?)", (cmd_id, p_id, -item["qte_retour"], item["prix_base"], -item["prix_base"] * item["qte_retour"], item.get("qte_retour_envoyee", 0)))
-
-                if bons_par_depot:
-                    cursor.execute("SELECT compteur_bons FROM Commandes WHERE id = ?", (cmd_id,))
-                    res_c = cursor.fetchone()
-                    compteur = res_c[0] if res_c and res_c[0] else 0
-                    nouveau_compteur = compteur + 1
-                    cursor.execute("UPDATE Commandes SET compteur_bons = ? WHERE id = ?", (nouveau_compteur, cmd_id))
-                    
-                conn.commit()
-
-                if bons_par_depot:
-                    date_now = datetime.datetime.now()
-                    date_str = date_now.strftime(sys_format_date)
-                    file_date_str = date_now.strftime('%Y-%m-%d_%H-%M-%S')
-                    full_print_str = ""
-                    for idx, (depot_name, items) in enumerate(bons_par_depot.items()):
-                        if idx > 0: 
-                            full_print_str += "\n\n" + "- " * 21 + "\n" + "--- COUPER ICI ---".center(42) + "\n" + "- " * 21 + "\n\n\n"
-                        bon_str = f"=== BON {depot_name.upper()} ==="[:42].center(42) + "\n"
-                        bon_str += f"BON #{cmd_id}-{nouveau_compteur} - {date_str}\n"
-                        bon_str += f"Caissier: {st.session_state.utilisateur['nom']}\n"
-                        bon_str += f"Type: {type_cmd}\n"
-                        if type_cmd == "Livraison" and client_adr:
-                            for ligne_adr in textwrap.wrap(f"Adresse: {client_adr}", width=42): 
-                                bon_str += f"{ligne_adr}\n"
-                        bon_str += "-" * 42 + "\n"
-                        for it in items:
-                            if it["qte_a_imprimer"] > 0: 
-                                bon_str += f"{fmt_qte(it['qte_a_imprimer'])}x {it['nom']}\n"
-                            if it["qte_retour"] > 0: 
-                                bon_str += f"-{fmt_qte(it['qte_retour'])}x {it['nom']} (Annul.)\n"
-                        bon_str += "-" * 42 + "\n"
-                        full_print_str += bon_str
-                    full_print_str += "\n\n\n\n"
-                    nom_exp_b = f"Bon_{cmd_id}-{nouveau_compteur}_{file_date_str}.txt"
-                    if hasattr(os, 'startfile'): 
-                        imprimer_ticket_windows(full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons")
-                    else: 
-                        sauvegarder_ticket_local(full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons")
-                    msg_print = "Nouveaux articles envoyés en préparation et imprimés !"
-                else: 
-                    msg_print = "Rien de nouveau à imprimer."
-
-                st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
-                st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
-                st.session_state.active_client_name = "Passager (Anonyme)"
-                st.success(f"Ticket mis en attente. {msg_print}")
-                st.rerun()
 
         with col_menu:
             st.markdown("#### 🍔 Menu & Produits")
@@ -1885,6 +1840,7 @@ elif menu == "Prise de Commande":
                             row_prod = df_all_prods[df_all_prods['id'] == p_id].iloc[0]
                             if p_id in st.session_state.panier: 
                                 st.session_state.panier[p_id]["qte"] += 1
+                                st.session_state[f"in_qte_{p_id}_{st.session_state.panier[p_id]['qte'] - 1}"] = float(st.session_state.panier[p_id]["qte"])
                             else: 
                                 st.session_state.panier[p_id] = {"nom": row_prod["nom"], "prix_base": float(row_prod["prix"]), "qte": 1, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row_prod["applique_tva"]), "tva_rate": float(row_prod["tva_rate"])}
                             st.rerun()
@@ -1926,7 +1882,15 @@ elif menu == "Prise de Commande":
 
     with tab_historique:
         st.subheader("📜 Historique des Tickets")
-        df_historique = pd.read_sql_query("SELECT c.id as 'N°', c.date_creation as 'Date Création', c.date_paiement as 'Encaissement', c.type_commande as 'Type', COALESCE(cl.nom, c.nom_client, '-') as 'Client', u.nom as 'Caissier', COALESCE(c.methode_paiement, '-') as 'Paiement', c.total as 'Total', c.pourboire as 'Pourboire', c.statut as 'Statut', c.utilisateur_id FROM Commandes c LEFT JOIN Clients cl ON c.client_id = cl.id LEFT JOIN Utilisateurs u ON c.utilisateur_id = u.id ORDER BY c.id DESC LIMIT 1000", conn)
+        df_historique = pd.read_sql_query("""
+            SELECT c.id as 'N°', c.date_creation as 'Date Création', c.date_paiement as 'Encaissement', c.type_commande as 'Type', COALESCE(cl.nom, c.nom_client, '-') as 'Client', u.nom as 'Caissier', COALESCE(c.methode_paiement, '-') as 'Paiement', 
+            COALESCE((SELECT SUM(lc.sous_total - (lc.sous_total / (1 + cat.tva / 100))) FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id JOIN Categories cat ON p.categorie_id = cat.id WHERE lc.commande_id = c.id AND p.applique_tva = 1 AND cat.tva > 0), 0) as 'TVA',
+            c.total as 'Total TTC', c.pourboire as 'Pourboire', c.statut as 'Statut', c.utilisateur_id 
+            FROM Commandes c 
+            LEFT JOIN Clients cl ON c.client_id = cl.id 
+            LEFT JOIN Utilisateurs u ON c.utilisateur_id = u.id 
+            ORDER BY c.id DESC LIMIT 1000
+        """, conn)
 
         if not df_historique.empty and role_actif != "Manager":
             df_historique = df_historique[df_historique["utilisateur_id"] == st.session_state.utilisateur["id"]]
@@ -1934,6 +1898,9 @@ elif menu == "Prise de Commande":
         if df_historique.empty: 
             st.info("Aucun ticket dans l'historique.")
         else:
+            df_historique['Total HT'] = df_historique['Total TTC'] - df_historique['TVA']
+            df_historique = df_historique[['N°', 'Date Création', 'Encaissement', 'Type', 'Client', 'Caissier', 'Paiement', 'Total HT', 'TVA', 'Total TTC', 'Pourboire', 'Statut', 'utilisateur_id']]
+
             params_db = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
             heure_fin = int(params_db.get("heure_fin_service", 5))
             df_historique['Date_Calc'] = pd.to_datetime(df_historique['Encaissement'].fillna(df_historique['Date Création']))
@@ -1963,9 +1930,17 @@ elif menu == "Prise de Commande":
             if f_paiement != "Tous": df_filtre = df_filtre[df_filtre["Paiement"] == f_paiement]
 
             st.divider()
-            ct1, ct2 = st.columns(2)
-            ct1.markdown(f"### 💰 CA de la sélection : {fmt_prix(df_filtre['Total'].sum())} FCFA")
-            ct2.markdown(f"#### 🎁 Pourboires : {fmt_prix(df_filtre['Pourboire'].sum())} FCFA")
+            
+            ca_ttc_tot = df_filtre['Total TTC'].sum()
+            tva_tot = df_filtre['TVA'].sum()
+            ca_ht_tot = df_filtre['Total HT'].sum()
+            pourboires_tot = df_filtre['Pourboire'].sum()
+            
+            ct1, ct2, ct3, ct4 = st.columns(4)
+            ct1.markdown(f"#### 💰 CA TTC : {fmt_prix(ca_ttc_tot)} FCFA")
+            ct2.markdown(f"#### 📦 CA HT : {fmt_prix(ca_ht_tot)} FCFA")
+            ct3.markdown(f"#### 🏷️ TVA : {fmt_prix(tva_tot)} FCFA")
+            ct4.markdown(f"#### 🎁 Pourboire : {fmt_prix(pourboires_tot)} FCFA")
 
             def color_statut(val):
                 if val in ["À Crédit"]: return "color: orange; font-weight: bold;"
@@ -1975,10 +1950,55 @@ elif menu == "Prise de Commande":
             df_afficher_hist = df_filtre.drop(columns=["Date_Calc", "Date_Exploitation", "utilisateur_id"], errors='ignore')
             df_afficher_hist['Date Création'] = df_afficher_hist['Date Création'].apply(fmt_date)
             df_afficher_hist['Encaissement'] = df_afficher_hist['Encaissement'].apply(fmt_date)
-            df_afficher_hist['Total'] = df_afficher_hist['Total'].apply(fmt_prix)
+            df_afficher_hist['Total HT'] = df_afficher_hist['Total HT'].apply(fmt_prix)
+            df_afficher_hist['TVA'] = df_afficher_hist['TVA'].apply(fmt_prix)
+            df_afficher_hist['Total TTC'] = df_afficher_hist['Total TTC'].apply(fmt_prix)
             df_afficher_hist['Pourboire'] = df_afficher_hist['Pourboire'].apply(fmt_prix)
+            
             st.dataframe(df_afficher_hist.style.map(color_statut, subset=["Statut"]), use_container_width=True, hide_index=True)
-            st.download_button(label="📥 Exporter l'historique", data=convert_df_to_csv(df_afficher_hist), file_name=f"Historique_{datetime.datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")
+            
+            col_exp_h1, col_exp_h2 = st.columns(2)
+            date_str_file_hist = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            
+            col_exp_h1.download_button(
+                label="📥 Exporter en CSV (Excel)", 
+                data=convert_df_to_csv(df_afficher_hist), 
+                file_name=f"Historique_Ventes_{date_str_file_hist}.csv", 
+                mime="text/csv", 
+                use_container_width=True
+            )
+            
+            html_report_hist = f"""
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>Historique des Ventes</title>
+                <style>
+                    body {{ font-family: sans-serif; margin: 20px; }}
+                    h2 {{ text-align: center; color: #333; }}
+                    table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+                    th, td {{ border: 1px solid #aaa; padding: 8px; text-align: left; font-size: 14px; }}
+                    th {{ background: #eee; font-weight: bold; }}
+                    .summary {{ text-align: center; margin-bottom: 20px; font-size: 1.2em; font-weight: bold; color: #0288d1; }}
+                    @media print {{ button {{ display: none; }} }}
+                </style>
+            </head>
+            <body>
+                <h2>Historique des Ventes - Édité le {datetime.datetime.now().strftime(sys_format_date)}</h2>
+                <div class="summary">CA TTC : {fmt_prix(ca_ttc_tot)} FCFA | CA HT : {fmt_prix(ca_ht_tot)} FCFA | TVA : {fmt_prix(tva_tot)} FCFA | Pourboires : {fmt_prix(pourboires_tot)} FCFA</div>
+                <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter en PDF / Imprimer</button>
+                {df_afficher_hist.to_html(index=False)}
+            </body>
+            </html>
+            """
+            
+            col_exp_h2.download_button(
+                label="🖨️ Imprimer / Exporter en PDF", 
+                data=html_report_hist, 
+                file_name=f"Historique_Ventes_{date_str_file_hist}.html", 
+                mime="text/html", 
+                use_container_width=True
+            )
 
             st.divider()
             st.subheader("🖨️ Gestion & Duplicata d'un ticket")
