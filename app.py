@@ -32,8 +32,9 @@ def force_db_update():
         CREATE TABLE IF NOT EXISTS Commandes (id INTEGER PRIMARY KEY AUTOINCREMENT, type_commande TEXT, statut TEXT, total REAL, pourboire REAL DEFAULT 0, nom_client TEXT, telephone TEXT, adresse TEXT, client_id INTEGER, methode_paiement TEXT, date_paiement TIMESTAMP, utilisateur_id INTEGER, zone_id INTEGER, frais_livraison REAL DEFAULT 0, compteur_bons INTEGER DEFAULT 0, date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS Paiements_Ticket (id INTEGER PRIMARY KEY AUTOINCREMENT, commande_id INTEGER REFERENCES Commandes(id), methode TEXT NOT NULL, montant REAL NOT NULL, date_paiement TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS Categories (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, tva REAL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS Sous_Categories (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, categorie_id INTEGER REFERENCES Categories(id));
         CREATE TABLE IF NOT EXISTS Depots (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS Produits (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, code_barre TEXT, prix REAL NOT NULL DEFAULT 0, prix_achat REAL DEFAULT 0, categorie_id INTEGER, depot_id INTEGER, applique_tva INTEGER DEFAULT 1, est_vendable INTEGER DEFAULT 1, est_achetable INTEGER DEFAULT 0, composition_id INTEGER REFERENCES Produits(id), composition_qte REAL DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS Produits (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, code_barre TEXT, prix REAL NOT NULL DEFAULT 0, prix_achat REAL DEFAULT 0, categorie_id INTEGER, sous_categorie_id INTEGER REFERENCES Sous_Categories(id), depot_id INTEGER, applique_tva INTEGER DEFAULT 1, est_vendable INTEGER DEFAULT 1, est_achetable INTEGER DEFAULT 0, composition_id INTEGER REFERENCES Produits(id), composition_qte REAL DEFAULT 1, unite_achat TEXT DEFAULT 'Unité', unite_vente TEXT DEFAULT 'Unité');
         CREATE TABLE IF NOT EXISTS Stock_Plats (id INTEGER PRIMARY KEY AUTOINCREMENT, produit_id INTEGER REFERENCES Produits(id), depot_id INTEGER REFERENCES Depots(id), quantite REAL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS Mouvements_Stock (id INTEGER PRIMARY KEY AUTOINCREMENT, produit_id INTEGER REFERENCES Produits(id), depot_id INTEGER REFERENCES Depots(id), fournisseur_id INTEGER, type_mouvement TEXT, quantite REAL, prix_unitaire REAL DEFAULT 0, valeur_totale REAL DEFAULT 0, reference TEXT, date_mvt TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS Lignes_Commande (id INTEGER PRIMARY KEY AUTOINCREMENT, commande_id INTEGER REFERENCES Commandes(id), produit_id INTEGER REFERENCES Produits(id), quantite INTEGER DEFAULT 1, prix_unitaire REAL NOT NULL, sous_total REAL NOT NULL, quantite_envoyee INTEGER DEFAULT 0, quantite_offert_envoyee INTEGER DEFAULT 0, quantite_retour_envoyee INTEGER DEFAULT 0);
@@ -55,6 +56,17 @@ def force_db_update():
     if "composition_qte" not in colonnes_prod: cursor.execute("ALTER TABLE Produits ADD COLUMN composition_qte REAL DEFAULT 1")
     if "unite_achat" not in colonnes_prod: cursor.execute("ALTER TABLE Produits ADD COLUMN unite_achat TEXT DEFAULT 'Unité'")
     if "unite_vente" not in colonnes_prod: cursor.execute("ALTER TABLE Produits ADD COLUMN unite_vente TEXT DEFAULT 'Unité'")
+    
+    if "sous_categorie_id" not in colonnes_prod: 
+        cursor.execute("ALTER TABLE Produits ADD COLUMN sous_categorie_id INTEGER REFERENCES Sous_Categories(id)")
+        cursor.execute("SELECT id FROM Categories")
+        cats = cursor.fetchall()
+        for cat in cats:
+            c_id = cat[0]
+            cursor.execute("SELECT id FROM Sous_Categories WHERE categorie_id=?", (c_id,))
+            if not cursor.fetchone():
+                cursor.execute("INSERT INTO Sous_Categories (nom, categorie_id) VALUES ('Général', ?)", (c_id,))
+        cursor.execute("UPDATE Produits SET sous_categorie_id = (SELECT id FROM Sous_Categories WHERE Sous_Categories.categorie_id = Produits.categorie_id LIMIT 1) WHERE sous_categorie_id IS NULL")
 
     cursor.execute("PRAGMA table_info(Mouvements_Stock)")
     cols_mvt = [c[1] for c in cursor.fetchall()]
@@ -370,16 +382,21 @@ elif menu == "Paramètres":
 
 elif menu == "Catalogue Articles":
     st.markdown("### 📦 Catalogue des Articles (Achats & Ventes)")
-    tab_categories, tab_produits, tab_carte, tab_import = st.tabs(["1. Catégories", "2. Créer / Modifier Article", "3. Liste Complète", "4. Import / Export (Excel)"])
+    tab_categories, tab_produits, tab_carte, tab_import = st.tabs(["1. Catégories & Sous-Catégories", "2. Créer / Modifier Article", "3. Liste Complète", "4. Import / Export (Excel)"])
     
     with tab_categories:
+        st.markdown("#### 1. Catégories Principales")
         col_ajout_cat, col_gest_cat = st.columns(2)
         with col_ajout_cat:
             with st.form("form_categorie", clear_on_submit=True):
                 nom_cat = st.text_input("Nom de la catégorie (ex: Boissons, Epicerie)")
-                tva_cat = st.number_input("TVA (%)", min_value=0.0, step=1.0, value=0.0)
-                if st.form_submit_button("Ajouter") and nom_cat: 
-                    cursor = conn.cursor(); cursor.execute("INSERT INTO Categories (nom, tva) VALUES (?, ?)", (nom_cat, tva_cat)); conn.commit(); st.rerun()
+                tva_cat = st.number_input("TVA par défaut (%)", min_value=0.0, step=1.0, value=0.0)
+                if st.form_submit_button("Ajouter la Catégorie") and nom_cat: 
+                    cursor = conn.cursor()
+                    cursor.execute("INSERT INTO Categories (nom, tva) VALUES (?, ?)", (nom_cat, tva_cat))
+                    cursor.execute("INSERT INTO Sous_Categories (nom, categorie_id) VALUES ('Général', ?)", (cursor.lastrowid,))
+                    conn.commit()
+                    st.rerun()
         with col_gest_cat:
             df_categories = pd.read_sql_query("SELECT id, nom, tva FROM Categories ORDER BY nom", conn)
             if not df_categories.empty:
@@ -394,20 +411,61 @@ elif menu == "Catalogue Articles":
                         if st.form_submit_button("Enregistrer"): 
                             cursor = conn.cursor(); cursor.execute("UPDATE Categories SET nom = ?, tva = ? WHERE id = ?", (nouveau_nom, n_tva_cat, id_cat)); conn.commit(); st.rerun()
                         if st.form_submit_button("Supprimer"):
-                            cursor = conn.cursor(); cursor.execute("SELECT id FROM Produits WHERE categorie_id = ?", (id_cat,))
-                            if cursor.fetchone(): st.error("❌ Des articles appartiennent à cette catégorie.")
-                            else: cursor.execute("DELETE FROM Categories WHERE id = ?", (id_cat,)); conn.commit(); st.rerun()
+                            cursor = conn.cursor(); cursor.execute("SELECT id FROM Sous_Categories WHERE categorie_id = ?", (id_cat,))
+                            if len(cursor.fetchall()) > 1: st.error("❌ Des sous-catégories spécifiques y sont liées.")
+                            else: 
+                                cursor.execute("SELECT id FROM Produits WHERE categorie_id = ?", (id_cat,))
+                                if cursor.fetchone(): st.error("❌ Des articles y sont liés.")
+                                else:
+                                    cursor.execute("DELETE FROM Sous_Categories WHERE categorie_id = ?", (id_cat,))
+                                    cursor.execute("DELETE FROM Categories WHERE id = ?", (id_cat,))
+                                    conn.commit(); st.rerun()
+
+        st.divider()
+        st.markdown("#### 2. Sous-Catégories")
+        c_scat_1, c_scat_2 = st.columns(2)
+        with c_scat_1:
+            if not df_categories.empty:
+                with st.form("form_sous_categorie", clear_on_submit=True):
+                    sel_cat_parent = st.selectbox("Catégorie Parente", options=list(cat_dict.keys()))
+                    nom_scat = st.text_input("Nom de la sous-catégorie (ex: Sodas, Bières)")
+                    if st.form_submit_button("Ajouter la Sous-Catégorie") and nom_scat:
+                        cursor = conn.cursor(); cursor.execute("INSERT INTO Sous_Categories (nom, categorie_id) VALUES (?, ?)", (nom_scat, cat_dict[sel_cat_parent])); conn.commit(); st.rerun()
+        with c_scat_2:
+            df_scat = pd.read_sql_query("SELECT s.id, s.nom, c.nom as cat_nom FROM Sous_Categories s JOIN Categories c ON s.categorie_id = c.id ORDER BY c.nom, s.nom", conn)
+            if not df_scat.empty:
+                df_scat["label"] = df_scat["cat_nom"] + " > " + df_scat["nom"]
+                scat_dict = dict(zip(df_scat["label"], df_scat["id"]))
+                choix_scat = st.selectbox("Sélectionnez une sous-catégorie :", options=list(scat_dict.keys()))
+                id_scat = int(scat_dict[choix_scat])
+                info_scat = df_scat[df_scat["id"] == id_scat].iloc[0]
+                with st.expander("✏️ Modifier / 🗑️ Supprimer"):
+                    with st.form("edit_scat"):
+                        n_nom_scat = st.text_input("Nouveau nom", value=info_scat["nom"])
+                        idx_cat_parent = list(cat_dict.keys()).index(info_scat["cat_nom"]) if info_scat["cat_nom"] in cat_dict else 0
+                        n_cat_parente = st.selectbox("Catégorie Parente", options=list(cat_dict.keys()), index=idx_cat_parent)
+                        if st.form_submit_button("Enregistrer"): 
+                            cursor = conn.cursor(); cursor.execute("UPDATE Sous_Categories SET nom = ?, categorie_id = ? WHERE id = ?", (n_nom_scat, cat_dict[n_cat_parente], id_scat)); conn.commit(); st.rerun()
+                        if st.form_submit_button("Supprimer"):
+                            cursor = conn.cursor(); cursor.execute("SELECT id FROM Produits WHERE sous_categorie_id = ?", (id_scat,))
+                            if cursor.fetchone(): st.error("❌ Des articles y sont liés.")
+                            elif info_scat["nom"] == "Général": st.error("❌ La sous-catégorie 'Général' ne peut être supprimée.")
+                            else: cursor.execute("DELETE FROM Sous_Categories WHERE id = ?", (id_scat,)); conn.commit(); st.rerun()
 
     with tab_produits:
         col_ajout_prod, col_gest_prod = st.columns(2)
         df_cat = pd.read_sql_query("SELECT id, nom, tva FROM Categories ORDER BY nom", conn)
+        df_scat_form = pd.read_sql_query("SELECT s.id, s.nom, c.nom as cat_nom, c.id as cid FROM Sous_Categories s JOIN Categories c ON s.categorie_id = c.id ORDER BY c.nom, s.nom", conn)
         df_depots = pd.read_sql_query("SELECT id, nom FROM Depots ORDER BY nom", conn)
         
         with col_ajout_prod:
             st.markdown("#### Nouvel Article")
-            if df_cat.empty: st.warning("Veuillez d'abord créer une catégorie.")
+            if df_scat_form.empty: st.warning("Veuillez d'abord créer une catégorie.")
             elif df_depots.empty: st.warning("Veuillez d'abord créer un Dépôt dans l'onglet Stocks.")
             else:
+                df_scat_form["label"] = df_scat_form["cat_nom"] + " > " + df_scat_form["nom"]
+                scat_dict_form = dict(zip(df_scat_form["label"], df_scat_form["id"]))
+
                 with st.form("form_produit", clear_on_submit=True):
                     code_prod = st.text_input("Code / Code Barre (Optionnel)")
                     nom_prod = st.text_input("Nom de l'article *")
@@ -420,8 +478,8 @@ elif menu == "Catalogue Articles":
                     unite_achat = c_ua.text_input("Unité d'achat (ex: Carton, Kg, Unité)", value="Unité")
                     unite_vente = c_uv.text_input("Unité de vente (ex: Pièce, Portion, Unité)", value="Unité")
                     
-                    cat_dict = dict(zip(df_cat["nom"], df_cat["id"]))
-                    choix_cat_ajout = st.selectbox("Catégorie", options=list(cat_dict.keys()))
+                    choix_scat_ajout = st.selectbox("Catégorie & Sous-Catégorie", options=list(scat_dict_form.keys()))
+                    
                     dep_dict = dict(zip(df_depots["nom"], df_depots["id"]))
                     choix_dep_ajout = st.selectbox("Dépôt par défaut", options=list(dep_dict.keys()))
                     
@@ -447,11 +505,14 @@ elif menu == "Catalogue Articles":
                         comp_id = base_dict[choix_base] if est_conditionnement and choix_base else None
                         comp_qte = qte_base if est_conditionnement else 1.0
                         
+                        s_id_selected = scat_dict_form[choix_scat_ajout]
+                        c_id_selected = int(df_scat_form[df_scat_form["id"] == s_id_selected].iloc[0]["cid"])
+
                         cursor.execute("""
-                            INSERT INTO Produits (nom, code_barre, prix, prix_achat, unite_achat, unite_vente, categorie_id, depot_id, 
+                            INSERT INTO Produits (nom, code_barre, prix, prix_achat, unite_achat, unite_vente, categorie_id, sous_categorie_id, depot_id, 
                             applique_tva, est_vendable, est_achetable, composition_id, composition_qte) 
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (nom_prod, code_prod, prix_vente, prix_achat, unite_achat, unite_vente, int(cat_dict[choix_cat_ajout]), 
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (nom_prod, code_prod, prix_vente, prix_achat, unite_achat, unite_vente, c_id_selected, s_id_selected, 
                               int(dep_dict[choix_dep_ajout]), int(applique_tva), int(est_vendable), int(est_achetable), 
                               comp_id, comp_qte))
                         
@@ -465,16 +526,18 @@ elif menu == "Catalogue Articles":
         with col_gest_prod:
             st.markdown("#### Gérer un Article existant")
             df_produits = pd.read_sql_query("""
-                SELECT p.id, p.nom, p.code_barre, p.prix, p.prix_achat, p.unite_achat, p.unite_vente, p.categorie_id, p.depot_id, 
-                p.applique_tva, p.est_vendable, p.est_achetable, p.composition_id, p.composition_qte, c.nom as nom_cat 
-                FROM Produits p JOIN Categories c ON p.categorie_id = c.id ORDER BY p.nom
+                SELECT p.id, p.nom, p.code_barre, p.prix, p.prix_achat, p.unite_achat, p.unite_vente, p.categorie_id, p.sous_categorie_id, p.depot_id, 
+                p.applique_tva, p.est_vendable, p.est_achetable, p.composition_id, p.composition_qte, c.nom as nom_cat, sc.nom as nom_scat 
+                FROM Produits p JOIN Categories c ON p.categorie_id = c.id LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id ORDER BY p.nom
             """, conn)
             
-            if not df_produits.empty and not df_cat.empty and not df_depots.empty:
-                df_produits["label"] = df_produits["nom"] + " (" + df_produits["nom_cat"] + ")"
+            if not df_produits.empty and not df_scat_form.empty and not df_depots.empty:
+                df_produits["label"] = df_produits["nom"] + " (" + df_produits["nom_cat"] + " > " + df_produits["nom_scat"].fillna('Général') + ")"
                 prod_dict = dict(zip(df_produits["label"], df_produits["id"]))
-                cat_dict_norm = dict(zip(df_cat["nom"], df_cat["id"]))
-                cat_dict_inv = dict(zip(df_cat["id"], df_cat["nom"]))
+                
+                df_scat_form["label"] = df_scat_form["cat_nom"] + " > " + df_scat_form["nom"]
+                scat_dict_edit = dict(zip(df_scat_form["label"], df_scat_form["id"]))
+
                 dep_dict_norm = dict(zip(df_depots["nom"], df_depots["id"]))
                 dep_dict_inv = dict(zip(df_depots["id"], df_depots["nom"]))
                 base_dict_inv = dict(zip(df_produits["id"], df_produits["nom"]))
@@ -496,8 +559,13 @@ elif menu == "Catalogue Articles":
                         n_unite_achat = c_ua.text_input("Unité d'achat", value=str(prod_info.get("unite_achat", "Unité")))
                         n_unite_vente = c_uv.text_input("Unité de vente", value=str(prod_info.get("unite_vente", "Unité")))
 
-                        c_actuelle = cat_dict_inv.get(prod_info["categorie_id"], list(cat_dict_norm.keys())[0])
-                        n_cat = st.selectbox("Catégorie", options=list(cat_dict_norm.keys()), index=list(cat_dict_norm.keys()).index(c_actuelle))
+                        s_actuel_id = prod_info["sous_categorie_id"]
+                        s_actuel_label = list(scat_dict_edit.keys())[0]
+                        for label, s_id in scat_dict_edit.items():
+                            if s_id == s_actuel_id:
+                                s_actuel_label = label; break
+                        
+                        n_scat_label = st.selectbox("Catégorie & Sous-Catégorie", options=list(scat_dict_edit.keys()), index=list(scat_dict_edit.keys()).index(s_actuel_label))
                         
                         d_actuel = dep_dict_inv.get(prod_info["depot_id"], list(dep_dict_norm.keys())[0])
                         n_dep = st.selectbox("Dépôt par défaut", options=list(dep_dict_norm.keys()), index=list(dep_dict_norm.keys()).index(d_actuel))
@@ -512,28 +580,31 @@ elif menu == "Catalogue Articles":
                         n_est_cond = st.checkbox("Conditionnement", value=est_cond)
                         
                         df_base_dispos = df_produits[(df_produits["id"] != id_prod) & (df_produits["composition_id"].isna())]
-                        base_dict_edit = dict(zip(df_base_dispos["nom"], df_base_dispos["id"]))
+                        base_dict_edit_opts = dict(zip(df_base_dispos["nom"], df_base_dispos["id"]))
                         
                         n_comp_id = None
                         n_comp_qte = 1.0
                         if not df_base_dispos.empty:
-                            base_def_nom = base_dict_inv.get(prod_info["composition_id"], list(base_dict_edit.keys())[0])
-                            idx_base = list(base_dict_edit.keys()).index(base_def_nom) if base_def_nom in base_dict_edit else 0
-                            n_choix_base = st.selectbox("Article de base :", options=list(base_dict_edit.keys()), index=idx_base)
+                            base_def_nom = base_dict_inv.get(prod_info["composition_id"], list(base_dict_edit_opts.keys())[0])
+                            idx_base = list(base_dict_edit_opts.keys()).index(base_def_nom) if base_def_nom in base_dict_edit_opts else 0
+                            n_choix_base = st.selectbox("Article de base :", options=list(base_dict_edit_opts.keys()), index=idx_base)
                             n_comp_qte = st.number_input("Multiplicateur", min_value=1.0, step=1.0, value=float(prod_info["composition_qte"]))
                         
                         if st.form_submit_button("Enregistrer les modifications", type="primary") and n_nom: 
                             cursor = conn.cursor()
                             if n_est_cond and not df_base_dispos.empty:
-                                n_comp_id = base_dict_edit[n_choix_base]
+                                n_comp_id = base_dict_edit_opts[n_choix_base]
                             else:
                                 n_comp_id = None
                                 n_comp_qte = 1.0
                                 
+                            n_s_id = scat_dict_edit[n_scat_label]
+                            n_c_id = int(df_scat_form[df_scat_form["id"] == n_s_id].iloc[0]["cid"])
+
                             cursor.execute("""
-                                UPDATE Produits SET nom=?, code_barre=?, prix=?, prix_achat=?, unite_achat=?, unite_vente=?, categorie_id=?, depot_id=?, 
+                                UPDATE Produits SET nom=?, code_barre=?, prix=?, prix_achat=?, unite_achat=?, unite_vente=?, categorie_id=?, sous_categorie_id=?, depot_id=?, 
                                 applique_tva=?, est_vendable=?, est_achetable=?, composition_id=?, composition_qte=? WHERE id=?
-                            """, (n_nom, n_code, n_prix_ven, n_prix_ach, n_unite_achat, n_unite_vente, cat_dict_norm[n_cat], dep_dict_norm[n_dep], 
+                            """, (n_nom, n_code, n_prix_ven, n_prix_ach, n_unite_achat, n_unite_vente, n_c_id, n_s_id, dep_dict_norm[n_dep], 
                                   int(n_applique_tva), int(n_est_ven), int(n_est_ach), n_comp_id, n_comp_qte, id_prod))
                             conn.commit(); st.rerun()
                             
@@ -557,9 +628,9 @@ elif menu == "Catalogue Articles":
             SELECT p.code_barre as 'Code', p.nom as 'Article', 
             CASE WHEN p.est_achetable=1 THEN p.prix_achat || ' F / ' || p.unite_achat ELSE '-' END as 'Prix Achat', 
             CASE WHEN p.est_vendable=1 THEN p.prix || ' F / ' || p.unite_vente ELSE '-' END as 'Prix Vente', 
-            c.nom as 'Catégorie', 
+            c.nom as 'Catégorie', COALESCE(sc.nom, 'Général') as 'Sous-Catégorie',
             CASE WHEN p.composition_id IS NOT NULL THEN 'Condit. (' || p.composition_qte || 'x)' ELSE 'Base' END as 'Type'
-            FROM Produits p JOIN Categories c ON p.categorie_id = c.id ORDER BY c.nom, p.nom
+            FROM Produits p JOIN Categories c ON p.categorie_id = c.id LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id ORDER BY c.nom, sc.nom, p.nom
         """, conn)
         
         if not df_menu.empty:
@@ -576,11 +647,12 @@ elif menu == "Catalogue Articles":
         df_export = pd.read_sql_query("""
             SELECT p.code_barre as Code_Barre, p.nom as Nom_Article, p.prix_achat as Prix_Achat, p.prix as Prix_Vente, 
             p.unite_achat as Unite_Achat, p.unite_vente as Unite_Vente,
-            c.nom as Categorie, c.tva as TVA_Categorie, d.nom as Depot, 
+            c.nom as Categorie, COALESCE(sc.nom, 'Général') as Sous_Categorie, c.tva as TVA_Categorie, d.nom as Depot, 
             p.applique_tva as Applique_TVA, p.est_achetable as Achetable, p.est_vendable as Vendable, 
             p_base.nom as Article_De_Base, p.composition_qte as Multiplicateur 
             FROM Produits p 
             LEFT JOIN Categories c ON p.categorie_id = c.id 
+            LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id
             LEFT JOIN Depots d ON p.depot_id = d.id 
             LEFT JOIN Produits p_base ON p.composition_id = p_base.id
         """, conn)
@@ -589,14 +661,14 @@ elif menu == "Catalogue Articles":
             df_export = pd.DataFrame([{
                 "Code_Barre": "32890000000", "Nom_Article": "Exemple Canette", "Prix_Achat": 250, "Prix_Vente": 500,
                 "Unite_Achat": "Unité", "Unite_Vente": "Unité",
-                "Categorie": "BOISSONS", "TVA_Categorie": 18.0, "Depot": "DEPOT PRINCIPAL",
+                "Categorie": "BOISSONS", "Sous_Categorie": "Sodas", "TVA_Categorie": 18.0, "Depot": "DEPOT PRINCIPAL",
                 "Applique_TVA": 1, "Achetable": 0, "Vendable": 1,
                 "Article_De_Base": "", "Multiplicateur": 1
             },
             {
                 "Code_Barre": "", "Nom_Article": "Exemple Pack 24x", "Prix_Achat": 5500, "Prix_Vente": 11000,
                 "Unite_Achat": "Pack", "Unite_Vente": "Pack",
-                "Categorie": "BOISSONS", "TVA_Categorie": 18.0, "Depot": "DEPOT PRINCIPAL",
+                "Categorie": "BOISSONS", "Sous_Categorie": "Sodas", "TVA_Categorie": 18.0, "Depot": "DEPOT PRINCIPAL",
                 "Applique_TVA": 1, "Achetable": 1, "Vendable": 1,
                 "Article_De_Base": "Exemple Canette", "Multiplicateur": 24
             }])
@@ -637,15 +709,25 @@ elif menu == "Catalogue Articles":
                         if not nom_art or nom_art == 'nan': continue
 
                         cat_nom = str(row.get('Categorie', 'Général')).strip()
+                        scat_nom = str(row.get('Sous_Categorie', 'Général')).strip()
                         cat_tva = float(row.get('TVA_Categorie', 0.0)) if pd.notna(row.get('TVA_Categorie')) else 0.0
                         depot_nom = str(row.get('Depot', 'DEPOT PRINCIPAL')).strip()
 
                         cursor.execute("SELECT id FROM Categories WHERE nom=?", (cat_nom,))
                         cat_res = cursor.fetchone()
-                        if cat_res: cat_id = cat_res[0]
+                        if cat_res: 
+                            cat_id = cat_res[0]
                         else:
                             cursor.execute("INSERT INTO Categories (nom, tva) VALUES (?, ?)", (cat_nom, cat_tva))
                             cat_id = cursor.lastrowid
+                            
+                        cursor.execute("SELECT id FROM Sous_Categories WHERE nom=? AND categorie_id=?", (scat_nom, cat_id))
+                        scat_res = cursor.fetchone()
+                        if scat_res:
+                            scat_id = scat_res[0]
+                        else:
+                            cursor.execute("INSERT INTO Sous_Categories (nom, categorie_id) VALUES (?, ?)", (scat_nom, cat_id))
+                            scat_id = cursor.lastrowid
 
                         cursor.execute("SELECT id FROM Depots WHERE nom=?", (depot_nom,))
                         dep_res = cursor.fetchone()
@@ -668,11 +750,11 @@ elif menu == "Catalogue Articles":
                         prod_res = cursor.fetchone()
                         if prod_res:
                             p_id = prod_res[0]
-                            cursor.execute("UPDATE Produits SET code_barre=?, prix=?, prix_achat=?, unite_achat=?, unite_vente=?, categorie_id=?, depot_id=?, applique_tva=?, est_vendable=?, est_achetable=? WHERE id=?",
-                                           (code_barre, p_vente, p_achat, u_achat, u_vente, cat_id, dep_id, app_tva, vendable, achatable, p_id))
+                            cursor.execute("UPDATE Produits SET code_barre=?, prix=?, prix_achat=?, unite_achat=?, unite_vente=?, categorie_id=?, sous_categorie_id=?, depot_id=?, applique_tva=?, est_vendable=?, est_achetable=? WHERE id=?",
+                                           (code_barre, p_vente, p_achat, u_achat, u_vente, cat_id, scat_id, dep_id, app_tva, vendable, achatable, p_id))
                         else:
-                            cursor.execute("INSERT INTO Produits (nom, code_barre, prix, prix_achat, unite_achat, unite_vente, categorie_id, depot_id, applique_tva, est_vendable, est_achetable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                                           (nom_art, code_barre, p_vente, p_achat, u_achat, u_vente, cat_id, dep_id, app_tva, vendable, achatable))
+                            cursor.execute("INSERT INTO Produits (nom, code_barre, prix, prix_achat, unite_achat, unite_vente, categorie_id, sous_categorie_id, depot_id, applique_tva, est_vendable, est_achetable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                           (nom_art, code_barre, p_vente, p_achat, u_achat, u_vente, cat_id, scat_id, dep_id, app_tva, vendable, achatable))
                             p_id = cursor.lastrowid
                             cursor.execute("INSERT INTO Stock_Plats (produit_id, depot_id, quantite) VALUES (?, ?, 0)", (p_id, dep_id))
 
@@ -1280,9 +1362,6 @@ elif menu == "Prise de Commande":
                                         st.session_state.panier[p_id]["qte_retour"] += abs(qte)
                                         st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
                                         
-                                    st.session_state[f"in_qte_{p_id}"] = float(st.session_state.panier[p_id]["qte"])
-                                    st.session_state[f"in_qteo_{p_id}"] = float(st.session_state.panier[p_id]["qte_offert"])
-                                    st.session_state[f"in_qter_{p_id}"] = float(st.session_state.panier[p_id]["qte_retour"])
                                 st.rerun()
                         else: 
                             st.session_state.commande_id_en_cours = None
@@ -1313,12 +1392,9 @@ elif menu == "Prise de Commande":
                         if c_off.button("🎁", key=f"off_{p_id}", help="Offrir", use_container_width=True): 
                             item["qte_offert"] += 1
                             item["qte"] = max(0, item["qte"] - 1)
-                            st.session_state[f"in_qteo_{p_id}"] = float(item["qte_offert"])
-                            st.session_state[f"in_qte_{p_id}"] = float(item["qte"])
                             st.rerun()
                         if c_ret.button("➖", key=f"ret_{p_id}", use_container_width=True): 
                             item["qte_retour"] += 1
-                            st.session_state[f"in_qter_{p_id}"] = float(item["qte_retour"])
                             st.rerun()
                             
                         key_qte = f"in_qte_{p_id}_{item['qte']}"
@@ -1329,12 +1405,10 @@ elif menu == "Prise de Commande":
                             
                         if c_plus.button("➕", key=f"add_{p_id}", use_container_width=True): 
                             item["qte"] += 1
-                            st.session_state[f"in_qte_{p_id}"] = float(item["qte"])
                             st.rerun()
                             
                         if c_del.button("🗑️", key=f"del_{p_id}", use_container_width=True): 
                             item["qte"] = 0
-                            st.session_state[f"in_qte_{p_id}"] = 0.0
                             st.rerun()
                             
                         c_prix.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>{fmt_prix(sous_total)} F</div>", unsafe_allow_html=True)
@@ -1345,7 +1419,6 @@ elif menu == "Prise de Commande":
                         c_off_o.write("")
                         if c_ret_o.button("➖", key=f"sub_o_{p_id}", use_container_width=True): 
                             item["qte_offert"] = max(0, item["qte_offert"] - 1)
-                            st.session_state[f"in_qteo_{p_id}"] = float(item["qte_offert"])
                             st.rerun()
                             
                         key_qteo = f"in_qteo_{p_id}_{item['qte_offert']}"
@@ -1356,11 +1429,9 @@ elif menu == "Prise de Commande":
                             
                         if c_plus_o.button("➕", key=f"add_o_{p_id}", use_container_width=True): 
                             item["qte_offert"] += 1
-                            st.session_state[f"in_qteo_{p_id}"] = float(item["qte_offert"])
                             st.rerun()
                         if c_del_o.button("🗑️", key=f"del_o_{p_id}", use_container_width=True): 
                             item["qte_offert"] = 0
-                            st.session_state[f"in_qteo_{p_id}"] = 0.0
                             st.rerun()
                         c_prix_o.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>0 F</div>", unsafe_allow_html=True)
 
@@ -1372,7 +1443,6 @@ elif menu == "Prise de Commande":
                         c_off_r.write("")
                         if c_ret_r.button("➖", key=f"add_r_{p_id}", use_container_width=True): 
                             item["qte_retour"] += 1
-                            st.session_state[f"in_qter_{p_id}"] = float(item["qte_retour"])
                             st.rerun()
                             
                         key_qter = f"in_qter_{p_id}_{item['qte_retour']}"
@@ -1383,11 +1453,9 @@ elif menu == "Prise de Commande":
                             
                         if c_plus_r.button("➕", key=f"sub_r_{p_id}", use_container_width=True): 
                             item["qte_retour"] = max(0, item["qte_retour"] - 1)
-                            st.session_state[f"in_qter_{p_id}"] = float(item["qte_retour"])
                             st.rerun()
                         if c_del_r.button("🗑️", key=f"del_r_{p_id}", use_container_width=True): 
                             item["qte_retour"] = 0
-                            st.session_state[f"in_qter_{p_id}"] = 0.0
                             st.rerun()
                         c_prix_r.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>{fmt_prix(sous_total_ret)} F</div>", unsafe_allow_html=True)
 
@@ -1817,7 +1885,6 @@ elif menu == "Prise de Commande":
                             row_prod = df_all_prods[df_all_prods['id'] == p_id].iloc[0]
                             if p_id in st.session_state.panier: 
                                 st.session_state.panier[p_id]["qte"] += 1
-                                st.session_state[f"in_qte_{p_id}_{st.session_state.panier[p_id]['qte'] - 1}"] = float(st.session_state.panier[p_id]["qte"])
                             else: 
                                 st.session_state.panier[p_id] = {"nom": row_prod["nom"], "prix_base": float(row_prod["prix"]), "qte": 1, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row_prod["applique_tva"]), "tva_rate": float(row_prod["tva_rate"])}
                             st.rerun()
@@ -1829,19 +1896,33 @@ elif menu == "Prise de Commande":
                 onglets = st.tabs(df_categories["nom"].tolist())
                 for i, onglet in enumerate(onglets):
                     cat_id = int(df_categories.iloc[i]["id"])
-                    df_prods = pd.read_sql_query("SELECT p.id, p.nom, p.prix, p.applique_tva, c.tva as tva_rate FROM Produits p JOIN Categories c ON p.categorie_id = c.id WHERE p.categorie_id = ? AND p.est_vendable = 1 ORDER BY p.nom", conn, params=(cat_id,))
+                    
+                    df_prods = pd.read_sql_query("""
+                        SELECT p.id, p.nom, p.prix, p.applique_tva, c.tva as tva_rate, sc.nom as scat_nom 
+                        FROM Produits p 
+                        JOIN Categories c ON p.categorie_id = c.id 
+                        LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id 
+                        WHERE p.categorie_id = ? AND p.est_vendable = 1 
+                        ORDER BY sc.nom, p.nom
+                    """, conn, params=(cat_id,))
+                    
                     with onglet:
                         if not df_prods.empty:
-                            cols_produits = st.columns(4)
-                            for index, row in df_prods.iterrows():
-                                col_idx = index % 4
-                                if cols_produits[col_idx].button(f"{row['nom']}\n{fmt_prix(row['prix'])} F", key=f"btn_prod_{row['id']}", use_container_width=True):
-                                    p_id = int(row["id"])
-                                    if p_id in st.session_state.panier: 
-                                        st.session_state.panier[p_id]["qte"] += 1
-                                    else: 
-                                        st.session_state.panier[p_id] = {"nom": row["nom"], "prix_base": float(row["prix"]), "qte": 1, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row["applique_tva"]), "tva_rate": float(row["tva_rate"])}
-                                    st.rerun()
+                            df_prods['scat_nom'] = df_prods['scat_nom'].fillna("Général")
+                            
+                            for scat_nom, group in df_prods.groupby('scat_nom'):
+                                st.markdown(f"<h6 style='color:#0288d1; margin-top:10px;'>{scat_nom}</h6>", unsafe_allow_html=True)
+                                cols_produits = st.columns(4)
+                                
+                                for index, row in group.reset_index().iterrows():
+                                    col_idx = index % 4
+                                    if cols_produits[col_idx].button(f"{row['nom']}\n{fmt_prix(row['prix'])} F", key=f"btn_prod_{row['id']}", use_container_width=True):
+                                        p_id = int(row["id"])
+                                        if p_id in st.session_state.panier: 
+                                            st.session_state.panier[p_id]["qte"] += 1
+                                        else: 
+                                            st.session_state.panier[p_id] = {"nom": row["nom"], "prix_base": float(row["prix"]), "qte": 1, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row["applique_tva"]), "tva_rate": float(row["tva_rate"])}
+                                        st.rerun()
 
     with tab_historique:
         st.subheader("📜 Historique des Tickets")
