@@ -173,8 +173,13 @@ if st.session_state.utilisateur is None:
                 else: st.error("❌ Code PIN incorrect.")
     st.stop()
 
-role_actif = st.session_state.utilisateur["role"]
-st.sidebar.markdown(f"👤 **{st.session_state.utilisateur['nom']}** ({role_actif})")
+role_reel = st.session_state.utilisateur["role"]
+# Le Super Admin aura accès aux mêmes menus que le Manager partout ailleurs dans l'app
+role_actif = "Manager" if role_reel == "Super Admin" else role_reel
+est_super_admin = (role_reel == "Super Admin" or st.session_state.utilisateur["nom"] == "Admin")
+
+affichage_role = "Super Admin" if est_super_admin else role_actif
+st.sidebar.markdown(f"👤 **{st.session_state.utilisateur['nom']}** ({affichage_role})")
 st.sidebar.info(f"🕒 **Horloge Système**\n\n{datetime.datetime.now().strftime(sys_format_date)}")
 if st.sidebar.button("Se déconnecter"): st.session_state.utilisateur = None; st.rerun()
 st.sidebar.divider()
@@ -189,52 +194,72 @@ conn = get_connection()
 
 if menu == "Équipe (Utilisateurs)":
     st.markdown("### 👥 Gestion du Personnel")
+    
     col1, col2 = st.columns([1, 2])
     with col1:
         st.subheader("Créer un compte")
         with st.form("form_user", clear_on_submit=True):
             nom_u = st.text_input("Nom de l'employé")
             pin_u = st.text_input("Code PIN de connexion", type="password")
-            role_u = st.selectbox("Rôle", ["Manager", "Serveur", "Caissier"])
+            
+            # Le Super Admin peut tout créer. Le Manager ne peut créer QUE Serveur et Caissier.
+            roles_creation = ["Super Admin", "Manager", "Serveur", "Caissier"] if est_super_admin else ["Serveur", "Caissier"]
+            role_u = st.selectbox("Rôle", roles_creation)
+            
             if st.form_submit_button("Ajouter l'utilisateur") and nom_u and pin_u:
                 cursor = conn.cursor()
                 try:
                     cursor.execute("INSERT INTO Utilisateurs (nom, pin, role) VALUES (?, ?, ?)", (nom_u, pin_u, role_u))
                     conn.commit()
-                    st.success(f"Utilisateur {nom_u} créé !"); st.rerun()
-                except sqlite3.IntegrityError: st.error("Ce nom ou ce code PIN est déjà utilisé !")
+                    st.success(f"Utilisateur {nom_u} créé avec succès !")
+                    st.rerun()
+                except sqlite3.IntegrityError: 
+                    st.error("Ce nom ou ce code PIN est déjà utilisé !")
+                    
     with col2:
         st.subheader("Liste et Gestion de l'équipe")
         df_users_liste = pd.read_sql_query("SELECT id, nom, role FROM Utilisateurs ORDER BY nom", conn)
         st.dataframe(df_users_liste.rename(columns={"nom": "Nom", "role": "Rôle"}), use_container_width=True, hide_index=True)
         st.divider()
+        
         if not df_users_liste.empty:
-            dict_u = dict(zip(df_users_liste["nom"], df_users_liste["id"]))
-            choix_u = st.selectbox("Sélectionnez un employé à modifier :", options=list(dict_u.keys()))
-            id_u = int(dict_u[choix_u])
-            role_actuel_u = df_users_liste[df_users_liste["id"] == id_u]["role"].iloc[0]
+            if est_super_admin:
+                dict_u = dict(zip(df_users_liste["nom"], df_users_liste["id"]))
+                choix_u = st.selectbox("Sélectionnez un employé à modifier :", options=list(dict_u.keys()))
+                id_u = int(dict_u[choix_u])
+                role_actuel_u = df_users_liste[df_users_liste["id"] == id_u]["role"].iloc[0]
 
-            with st.expander("✏️ Modifier cet employé"):
-                with st.form("edit_user"):
-                    e_nom = st.text_input("Nouveau nom", value=choix_u)
-                    e_pin = st.text_input("Nouveau Code PIN (Laissez vide)", type="password")
-                    roles_dispos = ["Manager", "Serveur", "Caissier"]
-                    idx_role = roles_dispos.index(role_actuel_u) if role_actuel_u in roles_dispos else 0
-                    e_role = st.selectbox("Rôle", roles_dispos, index=idx_role)
-                    if st.form_submit_button("Enregistrer les modifications"):
-                        cursor = conn.cursor()
-                        try:
-                            if e_pin.strip(): cursor.execute("UPDATE Utilisateurs SET nom=?, pin=?, role=? WHERE id=?", (e_nom, e_pin, e_role, id_u))
-                            else: cursor.execute("UPDATE Utilisateurs SET nom=?, role=? WHERE id=?", (e_nom, e_role, id_u))
-                            conn.commit()
-                            st.success("Utilisateur mis à jour !"); st.rerun()
-                        except sqlite3.IntegrityError: st.error("Ce nom ou PIN existe déjà !")
+                with st.expander("✏️ Modifier ou 🗑️ Supprimer (Droits Super Admin)"):
+                    with st.form("edit_user"):
+                        e_nom = st.text_input("Nouveau nom", value=choix_u)
+                        e_pin = st.text_input("Nouveau Code PIN (Laissez vide pour conserver l'actuel)", type="password")
+                        roles_dispos = ["Super Admin", "Manager", "Serveur", "Caissier"]
+                        idx_role = roles_dispos.index(role_actuel_u) if role_actuel_u in roles_dispos else 0
+                        e_role = st.selectbox("Rôle", roles_dispos, index=idx_role)
+                        
+                        col_btn_edit, col_btn_del = st.columns(2)
+                        if col_btn_edit.form_submit_button("Enregistrer", use_container_width=True):
+                            cursor = conn.cursor()
+                            try:
+                                if e_pin.strip(): 
+                                    cursor.execute("UPDATE Utilisateurs SET nom=?, pin=?, role=? WHERE id=?", (e_nom, e_pin, e_role, id_u))
+                                else: 
+                                    cursor.execute("UPDATE Utilisateurs SET nom=?, role=? WHERE id=?", (e_nom, e_role, id_u))
+                                conn.commit()
+                                st.success("Utilisateur mis à jour !"); st.rerun()
+                            except sqlite3.IntegrityError: 
+                                st.error("Ce nom ou PIN existe déjà !")
 
-            with st.expander("🗑️ Supprimer cet employé"):
-                with st.form("del_user"):
-                    if st.form_submit_button("Confirmer la suppression"):
-                        if choix_u == "Admin": st.error("❌ Impossible de supprimer l'administrateur par défaut.")
-                        else: cursor = conn.cursor(); cursor.execute("DELETE FROM Utilisateurs WHERE id = ?", (id_u,)); conn.commit(); st.rerun()
+                        if col_btn_del.form_submit_button("❌ Supprimer", use_container_width=True):
+                            if choix_u == "Admin": 
+                                st.error("❌ Impossible de supprimer le compte Super Admin principal.")
+                            else: 
+                                cursor = conn.cursor()
+                                cursor.execute("DELETE FROM Utilisateurs WHERE id = ?", (id_u,))
+                                conn.commit()
+                                st.rerun()
+            else:
+                st.info("🔒 Seul le Super Admin possède les droits pour modifier les rôles, changer les mots de passe et supprimer des employés.")
 
 elif menu == "Mouvements Caisse":
     st.markdown("### 💸 Mouvements de Caisse")
@@ -1328,16 +1353,50 @@ elif menu == "Stocks & Mouvements":
             col_export2.download_button(label="🖨️ Exporter PDF / Imprimer", data=html_report, file_name=f"Journal_Mouvements_{date_str_file_mvt}.html", mime="text/html", use_container_width=True)
 
     with tab_etat:
-        st.info("💡 Les quantités affichées concernent uniquement les unités de base (les conditionnements sont automatiquement convertis en unités lors des transactions).")
+        st.info("💡 Le système calcule automatiquement vos stocks en affichant les conditionnements complets (Bouteilles, Packs) et le reste en unités (Verres, Pièces).")
         df_etat_stock = pd.read_sql_query("""
-            SELECT d.nom as 'Dépôt', p.nom as 'Article (Base)', p.unite_vente as 'Unité', c.nom as 'Catégorie', COALESCE(sc.nom, 'Général') as 'Sous-Catégorie', s.quantite as 'En Stock' 
-            FROM Stock_Articles s JOIN Produits p ON s.produit_id = p.id JOIN Categories c ON p.categorie_id = c.id LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id JOIN Depots d ON s.depot_id = d.id 
-            WHERE p.composition_id IS NULL ORDER BY d.nom, c.nom, COALESCE(sc.nom, 'Général'), p.nom
+            SELECT 
+                d.nom as 'Dépôt', 
+                p.nom as 'Article (Base)', 
+                p.unite_vente as 'Unité', 
+                c.nom as 'Catégorie', 
+                COALESCE(sc.nom, 'Général') as 'Sous-Catégorie', 
+                s.quantite as 'En Stock',
+                (SELECT unite_vente FROM Produits WHERE composition_id = p.id LIMIT 1) as 'Cond_Unite',
+                (SELECT composition_qte FROM Produits WHERE composition_id = p.id LIMIT 1) as 'Cond_Qte'
+            FROM Stock_Articles s 
+            JOIN Produits p ON s.produit_id = p.id 
+            JOIN Categories c ON p.categorie_id = c.id 
+            LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id 
+            JOIN Depots d ON s.depot_id = d.id 
+            WHERE p.composition_id IS NULL 
+            ORDER BY d.nom, c.nom, COALESCE(sc.nom, 'Général'), p.nom
         """, conn)
         
         if not df_etat_stock.empty:
             df_etat_stock['En Stock Brut'] = df_etat_stock['En Stock'] 
-            df_etat_stock['En Stock'] = df_etat_stock['En Stock'].apply(fmt_qte)
+            
+            def format_stock_detail(row):
+                qte = float(row['En Stock Brut'])
+                base_unit = str(row['Unité'])
+                cond_qte = row['Cond_Qte']
+                cond_unit = row['Cond_Unite']
+                
+                # Si un conditionnement existe pour cet article de base
+                if pd.notna(cond_qte) and float(cond_qte) > 0 and pd.notna(cond_unit):
+                    cq = float(cond_qte)
+                    nb_cond = int(qte // cq)  # Nombre de bouteilles pleines
+                    reste = qte % cq          # Reste en verres
+                    
+                    if nb_cond > 0:
+                        if reste > 0:
+                            return f"{nb_cond} {cond_unit} + {fmt_qte(reste)} {base_unit}"
+                        else:
+                            return f"{nb_cond} {cond_unit}"
+                # Si pas de conditionnement, on affiche juste l'unité de base
+                return f"{fmt_qte(qte)} {base_unit}"
+                
+            df_etat_stock['En Stock'] = df_etat_stock.apply(format_stock_detail, axis=1)
             
             col_e1, col_e2 = st.columns(2)
             categories_dispo = ["Toutes"] + sorted(list(df_etat_stock["Catégorie"].unique()))
@@ -1349,8 +1408,10 @@ elif menu == "Stocks & Mouvements":
             df_filtre_etat = df_etat_stock.copy()
             if f_cat_etat != "Toutes": df_filtre_etat = df_filtre_etat[df_filtre_etat["Catégorie"] == f_cat_etat]
             if f_scat_etat != "Toutes": df_filtre_etat = df_filtre_etat[df_filtre_etat["Sous-Catégorie"] == f_scat_etat]
-                
-            st.dataframe(df_filtre_etat.drop(columns=["En Stock Brut"], errors="ignore"), use_container_width=True, hide_index=True)
+            
+            # Nettoyage des colonnes temporaires avant l'affichage
+            df_a_afficher = df_filtre_etat.drop(columns=["En Stock Brut", "Cond_Unite", "Cond_Qte"], errors="ignore")
+            st.dataframe(df_a_afficher, use_container_width=True, hide_index=True)
             
             date_str_file = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
             date_str_display = datetime.datetime.now().strftime(sys_format_date)
@@ -1359,7 +1420,7 @@ elif menu == "Stocks & Mouvements":
             
             col_export_e1.download_button(
                 label="📥 Exporter en Excel (CSV)", 
-                data=convert_df_to_csv(df_filtre_etat.drop(columns=["En Stock Brut"], errors="ignore")), 
+                data=convert_df_to_csv(df_a_afficher), 
                 file_name=f"Etat_du_Stock_{date_str_file}.csv", 
                 mime="text/csv", 
                 use_container_width=True
@@ -1382,7 +1443,7 @@ elif menu == "Stocks & Mouvements":
             <body>
                 <h2>État du Stock - Édité le {date_str_display}</h2>
                 <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter en PDF / Imprimer</button>
-                {df_filtre_etat.drop(columns=["En Stock Brut"], errors="ignore").to_html(index=False)}
+                {df_a_afficher.to_html(index=False)}
             </body>
             </html>
             """
@@ -2043,8 +2104,8 @@ elif menu == "Prise de Commande":
                     
                     with st.container():
                         c_p1, c_p2 = st.columns(2)
-                        idx_pmt = options_paiement.index("Note de Chambre") if type_cmd == "Room Service" and "Note de Chambre" in options_paiement else 0
-                        methode_saisie = c_p1.selectbox("Mode de paiement", options=options_paiement, index=idx_pmt)
+                        # On met index=None pour forcer le choix
+                        methode_saisie = c_p1.selectbox("Mode de paiement", options=options_paiement, index=None, placeholder="Choisir un mode...")
                         montant_saisi = c_p2.number_input("Montant", min_value=0.0, value=float(reste_a_payer), step=1000.0)
                         
                         chambre_pour_paiement = None
@@ -2058,7 +2119,10 @@ elif menu == "Prise de Commande":
                                 st.warning("Aucune chambre n'est configurée dans le système.")
                         
                         if st.button("➕ Ajouter paiement", use_container_width=True):
-                            if montant_saisi > 0:
+                            # Vérification de sécurité avant d'ajouter le paiement
+                            if not methode_saisie:
+                                st.error("⚠️ Vous devez sélectionner un mode de paiement !")
+                            elif montant_saisi > 0:
                                 st.session_state.paiements_partiels.append({
                                     "methode": methode_saisie, 
                                     "montant": montant_saisi,
@@ -2101,12 +2165,35 @@ elif menu == "Prise de Commande":
                 st.divider()
 
                 col_btn_vid, col_btn_att = st.columns(2)
-                if col_btn_vid.button("🗑️ Vider", use_container_width=True):
-                    st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
-                    st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
-                    st.session_state.table_active, st.session_state.chambre_active = None, None
-                    st.session_state.active_client_name = "Passager (Anonyme)"
-                    st.rerun()
+                # Le bouton change de nom si c'est un vrai ticket ou juste un brouillon
+                libelle_btn = "❌ Annuler le Ticket" if st.session_state.commande_id_en_cours else "🗑️ Vider"
+                
+                if col_btn_vid.button(libelle_btn, use_container_width=True):
+                    if st.session_state.commande_id_en_cours:
+                        if role_actif != "Manager":
+                            st.error("⚠️ Seul un Manager peut annuler un ticket déjà en cours.")
+                        else:
+                            cursor = conn.cursor()
+                            # On passe le ticket à 0 et on change son statut pour garder la trace
+                            cursor.execute("UPDATE Commandes SET statut = 'Annulé', total = 0, pourboire = 0 WHERE id = ?", (st.session_state.commande_id_en_cours,))
+                            cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (st.session_state.commande_id_en_cours,))
+                            
+                            if st.session_state.table_active:
+                                cursor.execute("UPDATE Tables_Resto SET statut = 'Libre', demande_addition = 0 WHERE id = ?", (st.session_state.table_active,))
+                            conn.commit()
+                            
+                            st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
+                            st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
+                            st.session_state.table_active, st.session_state.chambre_active = None, None
+                            st.session_state.active_client_name = "Passager (Anonyme)"
+                            st.success("Ticket annulé et conservé dans l'historique !")
+                            st.rerun()
+                    else:
+                        st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
+                        st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
+                        st.session_state.table_active, st.session_state.chambre_active = None, None
+                        st.session_state.active_client_name = "Passager (Anonyme)"
+                        st.rerun()
 
                 if col_btn_att.button("⏸️ Attente", use_container_width=True):
                     if choix_client == "+ Nouveau Client..." and client_tel:
@@ -2721,6 +2808,7 @@ elif menu == "Prise de Commande":
                 def color_statut(val):
                     if val in ["À Crédit", "Note de Chambre"]: return "color: orange; font-weight: bold;"
                     elif val == "Payée": return "color: green;"
+                    elif val == "Annulé": return "color: red; text-decoration: line-through;"
                     return ""
 
                 df_afficher_hist = df_filtre.drop(columns=["Date_Calc", "Date_Exploitation", "utilisateur_id"], errors='ignore')
