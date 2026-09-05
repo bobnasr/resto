@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 import io
 
-st.set_page_config(page_title="ERP Restaurant & Hôtel", page_icon="🍽️", layout="wide")
+st.set_page_config(page_title="Gestion Caisse POS & Stocks", page_icon="🍽️", layout="wide")
 st.markdown(
     """
     <style>
@@ -29,22 +29,15 @@ def force_db_update():
     cursor = conn.cursor()
 
     cursor.executescript("""
-        CREATE TABLE IF NOT EXISTS Commandes (id INTEGER PRIMARY KEY AUTOINCREMENT, type_commande TEXT, table_id INTEGER, chambre_id INTEGER, statut TEXT, total REAL, pourboire REAL DEFAULT 0, nom_client TEXT, telephone TEXT, adresse TEXT, client_id INTEGER, methode_paiement TEXT, date_paiement TIMESTAMP, utilisateur_id INTEGER, zone_id INTEGER, frais_livraison REAL DEFAULT 0, compteur_bons INTEGER DEFAULT 0, date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS Commandes (id INTEGER PRIMARY KEY AUTOINCREMENT, type_commande TEXT, statut TEXT, total REAL, pourboire REAL DEFAULT 0, nom_client TEXT, telephone TEXT, adresse TEXT, client_id INTEGER, methode_paiement TEXT, date_paiement TIMESTAMP, utilisateur_id INTEGER, zone_id INTEGER, frais_livraison REAL DEFAULT 0, compteur_bons INTEGER DEFAULT 0, date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS Paiements_Ticket (id INTEGER PRIMARY KEY AUTOINCREMENT, commande_id INTEGER REFERENCES Commandes(id), methode TEXT NOT NULL, montant REAL NOT NULL, date_paiement TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS Categories (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, tva REAL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS Sous_Categories (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, categorie_id INTEGER REFERENCES Categories(id));
         CREATE TABLE IF NOT EXISTS Depots (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL);
-        
         CREATE TABLE IF NOT EXISTS Produits (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, code_barre TEXT, prix REAL NOT NULL DEFAULT 0, prix_achat REAL DEFAULT 0, categorie_id INTEGER, sous_categorie_id INTEGER REFERENCES Sous_Categories(id), depot_id INTEGER, applique_tva INTEGER DEFAULT 1, est_vendable INTEGER DEFAULT 1, est_achetable INTEGER DEFAULT 0, composition_id INTEGER REFERENCES Produits(id), composition_qte REAL DEFAULT 1, unite_achat TEXT DEFAULT 'Unité', unite_vente TEXT DEFAULT 'Unité');
-        CREATE TABLE IF NOT EXISTS Stock_Articles (id INTEGER PRIMARY KEY AUTOINCREMENT, produit_id INTEGER REFERENCES Produits(id), depot_id INTEGER REFERENCES Depots(id), quantite REAL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS Stock_Plats (id INTEGER PRIMARY KEY AUTOINCREMENT, produit_id INTEGER REFERENCES Produits(id), depot_id INTEGER REFERENCES Depots(id), quantite REAL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS Mouvements_Stock (id INTEGER PRIMARY KEY AUTOINCREMENT, produit_id INTEGER REFERENCES Produits(id), depot_id INTEGER REFERENCES Depots(id), fournisseur_id INTEGER, type_mouvement TEXT, quantite REAL, prix_unitaire REAL DEFAULT 0, valeur_totale REAL DEFAULT 0, reference TEXT, date_mvt TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-        
         CREATE TABLE IF NOT EXISTS Lignes_Commande (id INTEGER PRIMARY KEY AUTOINCREMENT, commande_id INTEGER REFERENCES Commandes(id), produit_id INTEGER REFERENCES Produits(id), quantite INTEGER DEFAULT 1, prix_unitaire REAL NOT NULL, sous_total REAL NOT NULL, quantite_envoyee INTEGER DEFAULT 0, quantite_offert_envoyee INTEGER DEFAULT 0, quantite_retour_envoyee INTEGER DEFAULT 0);
-        
-        CREATE TABLE IF NOT EXISTS Salles (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS Tables_Resto (id INTEGER PRIMARY KEY AUTOINCREMENT, numero_table TEXT NOT NULL, capacite INTEGER, statut TEXT DEFAULT 'Libre', salle_id INTEGER, demande_addition INTEGER DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS Chambres_Hotel (id INTEGER PRIMARY KEY AUTOINCREMENT, numero_chambre TEXT NOT NULL UNIQUE);
-        
         CREATE TABLE IF NOT EXISTS Clients (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, telephone TEXT UNIQUE, adresse TEXT, zone_id INTEGER);
         CREATE TABLE IF NOT EXISTS Methodes_Paiement (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS Parametres_Restaurant (id INTEGER PRIMARY KEY CHECK (id = 1), nom TEXT, adresse TEXT, telephone TEXT, ninea TEXT, tva REAL DEFAULT 18.0, heure_fin_service INTEGER DEFAULT 5, format_date TEXT DEFAULT '%Y-%m-%d %H:%M', format_qte TEXT DEFAULT '0', format_prix TEXT DEFAULT ',');
@@ -54,19 +47,51 @@ def force_db_update():
         CREATE TABLE IF NOT EXISTS Mouvements_Caisse (id INTEGER PRIMARY KEY AUTOINCREMENT, type_mouvement TEXT NOT NULL, motif TEXT NOT NULL, montant REAL NOT NULL, utilisateur_id INTEGER REFERENCES Utilisateurs(id), date_mvt TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
     """)
 
-    cursor.execute("PRAGMA table_info(Categories)")
-    if "afficher_caisse" not in [col[1] for col in cursor.fetchall()]:
-        cursor.execute("ALTER TABLE Categories ADD COLUMN afficher_caisse INTEGER DEFAULT 1")
+    cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Depenses_Caisse'")
+    if cursor.fetchone()[0] == 1:
+        try:
+            cursor.execute("INSERT INTO Mouvements_Caisse (type_mouvement, motif, montant, utilisateur_id, date_mvt) SELECT 'Sortie', motif, montant, utilisateur_id, date_depense FROM Depenses_Caisse")
+            cursor.execute("DROP TABLE Depenses_Caisse")
+        except: pass
+
+    cursor.execute("PRAGMA table_info(Produits)")
+    colonnes_prod = [col[1] for col in cursor.fetchall()]
+    if "code_barre" not in colonnes_prod: cursor.execute("ALTER TABLE Produits ADD COLUMN code_barre TEXT")
+    if "prix_achat" not in colonnes_prod: cursor.execute("ALTER TABLE Produits ADD COLUMN prix_achat REAL DEFAULT 0")
+    if "est_vendable" not in colonnes_prod: cursor.execute("ALTER TABLE Produits ADD COLUMN est_vendable INTEGER DEFAULT 1")
+    if "est_achetable" not in colonnes_prod: cursor.execute("ALTER TABLE Produits ADD COLUMN est_achetable INTEGER DEFAULT 0")
+    if "composition_id" not in colonnes_prod: cursor.execute("ALTER TABLE Produits ADD COLUMN composition_id INTEGER REFERENCES Produits(id)")
+    if "composition_qte" not in colonnes_prod: cursor.execute("ALTER TABLE Produits ADD COLUMN composition_qte REAL DEFAULT 1")
+    if "unite_achat" not in colonnes_prod: cursor.execute("ALTER TABLE Produits ADD COLUMN unite_achat TEXT DEFAULT 'Unité'")
+    if "unite_vente" not in colonnes_prod: cursor.execute("ALTER TABLE Produits ADD COLUMN unite_vente TEXT DEFAULT 'Unité'")
+    
+    if "sous_categorie_id" not in colonnes_prod: 
+        cursor.execute("ALTER TABLE Produits ADD COLUMN sous_categorie_id INTEGER REFERENCES Sous_Categories(id)")
+        cursor.execute("SELECT id FROM Categories")
+        for cat in cursor.fetchall():
+            c_id = cat[0]
+            cursor.execute("SELECT id FROM Sous_Categories WHERE categorie_id=?", (c_id,))
+            if not cursor.fetchone():
+                cursor.execute("INSERT INTO Sous_Categories (nom, categorie_id) VALUES ('Général', ?)", (c_id,))
+        cursor.execute("UPDATE Produits SET sous_categorie_id = (SELECT id FROM Sous_Categories WHERE Sous_Categories.categorie_id = Produits.categorie_id LIMIT 1) WHERE sous_categorie_id IS NULL")
+
+    cursor.execute("PRAGMA table_info(Parametres_Restaurant)")
+    colonnes_param = [col[1] for col in cursor.fetchall()]
+    if "heure_fin_service" not in colonnes_param: cursor.execute("ALTER TABLE Parametres_Restaurant ADD COLUMN heure_fin_service INTEGER DEFAULT 5")
+    if "format_date" not in colonnes_param: cursor.execute("ALTER TABLE Parametres_Restaurant ADD COLUMN format_date TEXT DEFAULT '%Y-%m-%d %H:%M'")
+    if "format_qte" not in colonnes_param: cursor.execute("ALTER TABLE Parametres_Restaurant ADD COLUMN format_qte TEXT DEFAULT '0'")
+    if "format_prix" not in colonnes_param: cursor.execute("ALTER TABLE Parametres_Restaurant ADD COLUMN format_prix TEXT DEFAULT ','")
+    if "decimal_prix" not in colonnes_param: cursor.execute("ALTER TABLE Parametres_Restaurant ADD COLUMN decimal_prix TEXT DEFAULT '0'")
 
     cursor.execute("SELECT count(*) FROM Utilisateurs")
     if cursor.fetchone()[0] == 0: cursor.execute("INSERT INTO Utilisateurs (nom, pin, role) VALUES ('Admin', '1234', 'Manager')")
 
     cursor.execute("SELECT count(*) FROM Parametres_Restaurant")
-    if cursor.fetchone()[0] == 0: cursor.execute("INSERT INTO Parametres_Restaurant (id, nom, adresse, telephone, ninea, tva) VALUES (1, 'MON RESTAURANT', 'Dakar, Sénégal', '', '', 18.0)")
+    if cursor.fetchone()[0] == 0: cursor.execute("INSERT INTO Parametres_Restaurant (id, nom, adresse, telephone, ninea, tva) VALUES (1, 'MON COMMERCE', 'Dakar, Sénégal', '', '', 18.0)")
 
     cursor.execute("SELECT count(*) FROM Methodes_Paiement")
     if cursor.fetchone()[0] == 0:
-        for m in ["Espèces", "Carte Bancaire", "Wave", "Orange Money", "Chèque", "À Crédit", "Note de Chambre"]: cursor.execute("INSERT INTO Methodes_Paiement (nom) VALUES (?)", (m,))
+        for m in ["Espèces", "Carte Bancaire", "Wave", "Orange Money", "Chèque", "À Crédit"]: cursor.execute("INSERT INTO Methodes_Paiement (nom) VALUES (?)", (m,))
 
     conn.commit()
     conn.close()
@@ -109,17 +134,29 @@ if not df_params_global.empty:
     sys_format_date = df_params_global.iloc[0].get('format_date', '%Y-%m-%d %H:%M')
     sys_format_qte = str(df_params_global.iloc[0].get('format_qte', '0'))
     sys_format_prix = str(df_params_global.iloc[0].get('format_prix', ','))
+    sys_decimal_prix = str(df_params_global.iloc[0].get('decimal_prix', '0'))
     sys_heure_fin = int(df_params_global.iloc[0].get('heure_fin_service', 5))
 else:
-    sys_format_date, sys_format_qte, sys_format_prix, sys_heure_fin = '%Y-%m-%d %H:%M', '0', ',', 5
+    sys_format_date, sys_format_qte, sys_format_prix, sys_decimal_prix, sys_heure_fin = '%Y-%m-%d %H:%M', '0', ',', '0', 5
 
 def fmt_prix(val):
-    if pd.isna(val): return "0"
+    if pd.isna(val): val = 0.0
     val = float(val)
-    if sys_format_prix == ' ': return f"{val:,.0f}".replace(',', ' ')
-    elif sys_format_prix == '.': return f"{val:,.0f}".replace(',', '.')
-    elif sys_format_prix == '': return f"{val:.0f}"
-    return f"{val:,.0f}"
+    fmt_str = f"{{:,.{sys_decimal_prix}f}}"
+    base_str = fmt_str.format(val)
+    
+    if sys_format_prix == ' ':
+        if sys_decimal_prix != '0': return base_str.replace(',', ' ').replace('.', ',')
+        return base_str.replace(',', ' ')
+    elif sys_format_prix == '.':
+        if sys_decimal_prix != '0':
+            parts = base_str.split('.')
+            return parts[0].replace(',', '.') + ',' + parts[1]
+        return base_str.replace(',', '.')
+    elif sys_format_prix == '':
+        if sys_decimal_prix != '0': return base_str.replace(',', '').replace('.', ',')
+        return base_str.replace(',', '')
+    return base_str
 
 def fmt_qte(val):
     if pd.isna(val): return "0"
@@ -135,17 +172,16 @@ def fmt_date(dt_str):
 
 if "panier" not in st.session_state: st.session_state.panier = {}
 if "commande_id_en_cours" not in st.session_state: st.session_state.commande_id_en_cours = None
-if "table_active" not in st.session_state: st.session_state.table_active = None
-if "chambre_active" not in st.session_state: st.session_state.chambre_active = None
 if "utilisateur" not in st.session_state: st.session_state.utilisateur = None
 if "active_client_name" not in st.session_state: st.session_state.active_client_name = "Passager (Anonyme)"
-if "radio_type_cmd" not in st.session_state: st.session_state.radio_type_cmd = "Sur Place"
+if "radio_type_cmd" not in st.session_state: st.session_state.radio_type_cmd = "Caisse"
 if "panier_achats" not in st.session_state: st.session_state.panier_achats = []
 if "reset_achat" not in st.session_state: st.session_state.reset_achat = 0
 if "line_counter" not in st.session_state: st.session_state.line_counter = 0
 if "paiements_partiels" not in st.session_state: st.session_state.paiements_partiels = []
 if "pourboire_ticket" not in st.session_state: st.session_state.pourboire_ticket = 0.0
 if "paiements_credit" not in st.session_state: st.session_state.paiements_credit = []
+if "pourboire_credit" not in st.session_state: st.session_state.pourboire_credit = 0.0
 if "credit_ticket_id" not in st.session_state: st.session_state.credit_ticket_id = None
 
 if st.session_state.utilisateur is None:
@@ -173,19 +209,14 @@ if st.session_state.utilisateur is None:
                 else: st.error("❌ Code PIN incorrect.")
     st.stop()
 
-role_reel = st.session_state.utilisateur["role"]
-# Le Super Admin aura accès aux mêmes menus que le Manager partout ailleurs dans l'app
-role_actif = "Manager" if role_reel == "Super Admin" else role_reel
-est_super_admin = (role_reel == "Super Admin" or st.session_state.utilisateur["nom"] == "Admin")
-
-affichage_role = "Super Admin" if est_super_admin else role_actif
-st.sidebar.markdown(f"👤 **{st.session_state.utilisateur['nom']}** ({affichage_role})")
+role_actif = st.session_state.utilisateur["role"]
+st.sidebar.markdown(f"👤 **{st.session_state.utilisateur['nom']}** ({role_actif})")
 st.sidebar.info(f"🕒 **Horloge Système**\n\n{datetime.datetime.now().strftime(sys_format_date)}")
 if st.sidebar.button("Se déconnecter"): st.session_state.utilisateur = None; st.rerun()
 st.sidebar.divider()
 
 if role_actif == "Manager":
-    menu_options = ["Prise de Commande", "Tableau de Bord (Z Caisse)", "Mouvements Caisse", "Achats (Fournisseurs)", "Catalogue Articles", "Stocks & Mouvements", "Salles, Tables & Chambres", "Clients (CRM)", "Paramètres", "Équipe (Utilisateurs)"]
+    menu_options = ["Prise de Commande", "Tableau de Bord", "Mouvements Caisse", "Achats (Fournisseurs)", "Catalogue Articles", "Stocks & Mouvements", "Clients (CRM)", "Paramètres", "Équipe (Utilisateurs)"]
 else:
     menu_options = ["Prise de Commande", "Mouvements Caisse", "Clients (CRM)"]
 
@@ -194,72 +225,52 @@ conn = get_connection()
 
 if menu == "Équipe (Utilisateurs)":
     st.markdown("### 👥 Gestion du Personnel")
-    
     col1, col2 = st.columns([1, 2])
     with col1:
         st.subheader("Créer un compte")
         with st.form("form_user", clear_on_submit=True):
             nom_u = st.text_input("Nom de l'employé")
             pin_u = st.text_input("Code PIN de connexion", type="password")
-            
-            # Le Super Admin peut tout créer. Le Manager ne peut créer QUE Serveur et Caissier.
-            roles_creation = ["Super Admin", "Manager", "Serveur", "Caissier"] if est_super_admin else ["Serveur", "Caissier"]
-            role_u = st.selectbox("Rôle", roles_creation)
-            
+            role_u = st.selectbox("Rôle", ["Manager", "Caissier"])
             if st.form_submit_button("Ajouter l'utilisateur") and nom_u and pin_u:
                 cursor = conn.cursor()
                 try:
                     cursor.execute("INSERT INTO Utilisateurs (nom, pin, role) VALUES (?, ?, ?)", (nom_u, pin_u, role_u))
                     conn.commit()
-                    st.success(f"Utilisateur {nom_u} créé avec succès !")
-                    st.rerun()
-                except sqlite3.IntegrityError: 
-                    st.error("Ce nom ou ce code PIN est déjà utilisé !")
-                    
+                    st.success(f"Utilisateur {nom_u} créé !"); st.rerun()
+                except sqlite3.IntegrityError: st.error("Ce nom ou ce code PIN est déjà utilisé !")
     with col2:
         st.subheader("Liste et Gestion de l'équipe")
         df_users_liste = pd.read_sql_query("SELECT id, nom, role FROM Utilisateurs ORDER BY nom", conn)
         st.dataframe(df_users_liste.rename(columns={"nom": "Nom", "role": "Rôle"}), use_container_width=True, hide_index=True)
         st.divider()
-        
         if not df_users_liste.empty:
-            if est_super_admin:
-                dict_u = dict(zip(df_users_liste["nom"], df_users_liste["id"]))
-                choix_u = st.selectbox("Sélectionnez un employé à modifier :", options=list(dict_u.keys()))
-                id_u = int(dict_u[choix_u])
-                role_actuel_u = df_users_liste[df_users_liste["id"] == id_u]["role"].iloc[0]
+            dict_u = dict(zip(df_users_liste["nom"], df_users_liste["id"]))
+            choix_u = st.selectbox("Sélectionnez un employé à modifier :", options=list(dict_u.keys()))
+            id_u = int(dict_u[choix_u])
+            role_actuel_u = df_users_liste[df_users_liste["id"] == id_u]["role"].iloc[0]
 
-                with st.expander("✏️ Modifier ou 🗑️ Supprimer (Droits Super Admin)"):
-                    with st.form("edit_user"):
-                        e_nom = st.text_input("Nouveau nom", value=choix_u)
-                        e_pin = st.text_input("Nouveau Code PIN (Laissez vide pour conserver l'actuel)", type="password")
-                        roles_dispos = ["Super Admin", "Manager", "Serveur", "Caissier"]
-                        idx_role = roles_dispos.index(role_actuel_u) if role_actuel_u in roles_dispos else 0
-                        e_role = st.selectbox("Rôle", roles_dispos, index=idx_role)
-                        
-                        col_btn_edit, col_btn_del = st.columns(2)
-                        if col_btn_edit.form_submit_button("Enregistrer", use_container_width=True):
-                            cursor = conn.cursor()
-                            try:
-                                if e_pin.strip(): 
-                                    cursor.execute("UPDATE Utilisateurs SET nom=?, pin=?, role=? WHERE id=?", (e_nom, e_pin, e_role, id_u))
-                                else: 
-                                    cursor.execute("UPDATE Utilisateurs SET nom=?, role=? WHERE id=?", (e_nom, e_role, id_u))
-                                conn.commit()
-                                st.success("Utilisateur mis à jour !"); st.rerun()
-                            except sqlite3.IntegrityError: 
-                                st.error("Ce nom ou PIN existe déjà !")
+            with st.expander("✏️ Modifier cet employé"):
+                with st.form("edit_user"):
+                    e_nom = st.text_input("Nouveau nom", value=choix_u)
+                    e_pin = st.text_input("Nouveau Code PIN (Laissez vide)", type="password")
+                    roles_dispos = ["Manager", "Caissier"]
+                    idx_role = roles_dispos.index(role_actuel_u) if role_actuel_u in roles_dispos else 0
+                    e_role = st.selectbox("Rôle", roles_dispos, index=idx_role)
+                    if st.form_submit_button("Enregistrer les modifications"):
+                        cursor = conn.cursor()
+                        try:
+                            if e_pin.strip(): cursor.execute("UPDATE Utilisateurs SET nom=?, pin=?, role=? WHERE id=?", (e_nom, e_pin, e_role, id_u))
+                            else: cursor.execute("UPDATE Utilisateurs SET nom=?, role=? WHERE id=?", (e_nom, e_role, id_u))
+                            conn.commit()
+                            st.success("Utilisateur mis à jour !"); st.rerun()
+                        except sqlite3.IntegrityError: st.error("Ce nom ou PIN existe déjà !")
 
-                        if col_btn_del.form_submit_button("❌ Supprimer", use_container_width=True):
-                            if choix_u == "Admin": 
-                                st.error("❌ Impossible de supprimer le compte Super Admin principal.")
-                            else: 
-                                cursor = conn.cursor()
-                                cursor.execute("DELETE FROM Utilisateurs WHERE id = ?", (id_u,))
-                                conn.commit()
-                                st.rerun()
-            else:
-                st.info("🔒 Seul le Super Admin possède les droits pour modifier les rôles, changer les mots de passe et supprimer des employés.")
+            with st.expander("🗑️ Supprimer cet employé"):
+                with st.form("del_user"):
+                    if st.form_submit_button("Confirmer la suppression"):
+                        if choix_u == "Admin": st.error("❌ Impossible de supprimer l'administrateur par défaut.")
+                        else: cursor = conn.cursor(); cursor.execute("DELETE FROM Utilisateurs WHERE id = ?", (id_u,)); conn.commit(); st.rerun()
 
 elif menu == "Mouvements Caisse":
     st.markdown("### 💸 Mouvements de Caisse")
@@ -270,7 +281,7 @@ elif menu == "Mouvements Caisse":
         with st.form("form_mvt_caisse", clear_on_submit=True):
             type_mvt = st.radio("Type d'opération", ["Fond de Caisse", "Entrée", "Sortie"])
             motif = st.text_input("Motif (ex: Monnaie du matin, Facture d'eau...) *")
-            montant = st.number_input("Montant (FCFA) *", min_value=0.0, step=500.0)
+            montant = st.number_input("Montant (FCFA) *", min_value=0.0, step=100.0)
             if st.form_submit_button("Enregistrer le mouvement", type="primary"):
                 if motif and montant > 0:
                     cursor = conn.cursor()
@@ -337,7 +348,7 @@ elif menu == "Mouvements Caisse":
                 </body>
                 </html>
                 """
-                col_exp_m2.download_button(label="🖨️ Exporter PDF / Imprimer", data=html_mvt, file_name=f"Mouvements_{date_filtre_mvt.strftime('%Y%m%d')}.html", mime="text/html", use_container_width=True)
+                col_exp_m2.download_button(label="🖨️ Exporter en PDF / Imprimer", data=html_mvt, file_name=f"Mouvements_{date_filtre_mvt.strftime('%Y%m%d')}.html", mime="text/html", use_container_width=True)
                 
                 with st.expander("🗑️ Annuler un mouvement (Erreur de saisie)"):
                     dict_del = {f"[{row['Type']}] {row['Motif']} - {row['Montant (FCFA)']} (ID: {row['id']})": row['id'] for _, row in df_aff.iterrows()}
@@ -353,7 +364,7 @@ elif menu == "Mouvements Caisse":
         else:
             st.info("Aucun mouvement dans l'historique.")
 
-elif menu == "Tableau de Bord (Z Caisse)":
+elif menu == "Tableau de Bord":
     st.markdown("### 📊 Z de Caisse & Tableau de Bord")
     aujourdhui_biz = (datetime.datetime.now() - datetime.timedelta(hours=sys_heure_fin)).date()
     
@@ -370,10 +381,10 @@ elif menu == "Tableau de Bord (Z Caisse)":
     df_paies = pd.read_sql_query("""
         SELECT p.montant, p.methode, p.date_paiement, c.date_creation 
         FROM Paiements_Ticket p JOIN Commandes c ON p.commande_id = c.id
-        WHERE p.methode NOT IN ('À Crédit', 'Note de Chambre') AND p.methode NOT LIKE '%(Réglé)'
+        WHERE p.methode NOT IN ('À Crédit', 'Note de Chambre')
     """, conn)
     
-    df_cmd = pd.read_sql_query("SELECT id, total, pourboire, date_creation FROM Commandes", conn)
+    df_cmd = pd.read_sql_query("SELECT id, total, pourboire, date_creation, statut FROM Commandes WHERE statut IN ('Payée', 'À Crédit')", conn)
     
     ventes_especes_jour = 0.0
     reglements_anciens_especes = 0.0
@@ -402,6 +413,8 @@ elif menu == "Tableau de Bord (Z Caisse)":
                 label = f"↳ {methode}"
                 if anciens > 0 and jour > 0:
                     html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">{label} (Tickets du jour)</span><span>{fmt_prix(jour)} F</span></div>'
+                    html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">{label} (Anciens Crédits)</span><span>{fmt_prix(anciens)} F</span></div>'
+                elif anciens > 0 and jour == 0:
                     html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">{label} (Anciens Crédits)</span><span>{fmt_prix(anciens)} F</span></div>'
                 else:
                     html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">{label}</span><span>{fmt_prix(group["montant"].sum())} F</span></div>'
@@ -438,12 +451,12 @@ elif menu == "Tableau de Bord (Z Caisse)":
     cc1, cc2, cc3, cc4 = st.columns(4)
     cc1.metric("CA Réalisé (TTC)", f"{fmt_prix(ca_brut_ttc)} F")
     cc2.metric("Encaissé Autre", f"{fmt_prix(autres_paies_jour)} F")
-    cc3.metric("Créé à Crédit (Jour)", f"{fmt_prix(credits_du_jour)} F")
+    cc3.metric("Tickets à Crédit (Jour)", f"{fmt_prix(credits_du_jour)} F")
     cc4.metric("Pourboires", f"{fmt_prix(pourboires)} F")
     
     st.divider()
     
-    df_tous_tickets = pd.read_sql_query("SELECT c.id as 'N°', c.date_creation as 'Heure', c.type_commande as 'Type', c.statut as 'Statut', COALESCE(c.methode_paiement, '-') as 'Paiement', c.total as 'Total (FCFA)', COALESCE(t.numero_table, ch.numero_chambre, '-') as 'Support' FROM Commandes c LEFT JOIN Tables_Resto t ON c.table_id = t.id LEFT JOIN Chambres_Hotel ch ON c.chambre_id = ch.id ORDER BY c.id DESC", conn)
+    df_tous_tickets = pd.read_sql_query("SELECT id as 'N°', date_creation as 'Heure', type_commande as 'Type', statut as 'Statut', COALESCE(methode_paiement, '-') as 'Paiement', total as 'Total (FCFA)' FROM Commandes WHERE statut != 'En attente' ORDER BY id DESC", conn)
     df_tous_tickets['Date_Exploitation'] = (pd.to_datetime(df_tous_tickets['Heure']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
     tickets_du_jour = df_tous_tickets[df_tous_tickets['Date_Exploitation'] == aujourdhui_biz].copy()
     
@@ -488,7 +501,7 @@ elif menu == "Tableau de Bord (Z Caisse)":
             <div class="line"><span>Nombre de tickets émis</span><span>{nb_tickets}</span></div>
             <div class="line"><span><strong>Paiements Numériques / Chèques</strong></span><span><strong>{fmt_prix(autres_paies_jour)} F</strong></span></div>
             {html_autres_paies}
-            <div class="line"><span>Créances Client (Crédits et Notes de chambre générés ce jour)</span><span>{fmt_prix(credits_du_jour)} F</span></div>
+            <div class="line"><span>Créances Client (Crédits générés ce jour)</span><span>{fmt_prix(credits_du_jour)} F</span></div>
             <div class="line"><span>Pourboires enregistrés</span><span>{fmt_prix(pourboires)} F</span></div>
         </div>
     </body>
@@ -609,12 +622,20 @@ elif menu == "Paramètres":
             dict_prix = {"1,000 (Virgule)": ",", "1 000 (Espace)": " ", "1.000 (Point)": ".", "1000 (Aucun)": ""}
             inv_dict_prix = {v: k for k, v in dict_prix.items()}
             act_p = inv_dict_prix.get(sys_format_prix, "1,000 (Virgule)")
+            
+            dict_dec_prix = {"0 Décimale (ex: 1000)": "0", "1 Décimale (ex: 1000.5)": "1", "2 Décimales (ex: 1000.50)": "2"}
+            inv_dict_dec_prix = {v: k for k, v in dict_dec_prix.items()}
+            act_dp = inv_dict_dec_prix.get(sys_decimal_prix, "0 Décimale (ex: 1000)")
+
             sel_date = c1.selectbox("Format Date & Heure", list(dict_dates.keys()), index=list(dict_dates.keys()).index(act_d))
             sel_qte = c2.selectbox("Format Quantité", list(dict_qte.keys()), index=list(dict_qte.keys()).index(act_q))
             sel_prix = c1.selectbox("Séparateur de milliers (Prix)", list(dict_prix.keys()), index=list(dict_prix.keys()).index(act_p))
+            sel_dec_prix = c2.selectbox("Décimales (Prix)", list(dict_dec_prix.keys()), index=list(dict_dec_prix.keys()).index(act_dp))
+            
             if st.form_submit_button("Enregistrer les préférences"):
                 cursor = conn.cursor()
-                cursor.execute("UPDATE Parametres_Restaurant SET format_date=?, format_qte=?, format_prix=? WHERE id=1", (dict_dates[sel_date], dict_qte[sel_qte], dict_prix[sel_prix]))
+                cursor.execute("UPDATE Parametres_Restaurant SET format_date=?, format_qte=?, format_prix=?, decimal_prix=? WHERE id=1", 
+                               (dict_dates[sel_date], dict_qte[sel_qte], dict_prix[sel_prix], dict_dec_prix[sel_dec_prix]))
                 conn.commit(); st.success("Formats mis à jour !"); st.rerun()
                 
     with tab_backup:
@@ -623,7 +644,7 @@ elif menu == "Paramètres":
         if os.path.exists(db_path):
             with open(db_path, "rb") as f: db_bytes = f.read()
             date_backup = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
-            st.download_button(label="⬇️ Télécharger la sauvegarde (.db)", data=db_bytes, file_name=f"Sauvegarde_ERP_{date_backup}.db", mime="application/octet-stream", type="primary")
+            st.download_button(label="⬇️ Télécharger la sauvegarde (.db)", data=db_bytes, file_name=f"Sauvegarde_Caisse_{date_backup}.db", mime="application/octet-stream", type="primary")
         st.divider()
         st.markdown("### ♻️ Restauration de la base de données")
         fichier_upload = st.file_uploader("Sélectionnez un fichier de sauvegarde (.db)", type=["db"])
@@ -636,24 +657,23 @@ elif menu == "Paramètres":
 
 elif menu == "Catalogue Articles":
     st.markdown("### 📦 Catalogue des Articles (Achats & Ventes)")
-    tab_categories, tab_produits, tab_carte, tab_import = st.tabs(["1. Catégories & Sous-Catégories", "2. Créer / Modifier Article", "3. Liste Complète", "4. Import / Export (Excel)"])
+    tab_categories, tab_produits, tab_carte, tab_import, tab_admin = st.tabs(["1. Catégories & Sous-Catégories", "2. Créer / Modifier Article", "3. Liste Complète", "4. Import / Export", "5. Nettoyage Admin"])
     
     with tab_categories:
         st.markdown("#### 1. Catégories Principales")
         col_ajout_cat, col_gest_cat = st.columns(2)
         with col_ajout_cat:
             with st.form("form_categorie", clear_on_submit=True):
-                nom_cat = st.text_input("Nom de la catégorie (ex: Boissons, Cuisine)")
+                nom_cat = st.text_input("Nom de la catégorie (ex: Boissons, Epicerie)")
                 tva_cat = st.number_input("TVA par défaut (%)", min_value=0.0, step=1.0, value=0.0)
-                afficher_caisse = st.checkbox("Afficher dans la Caisse", value=True, help="Décochez pour cacher cette catégorie aux serveurs")
                 if st.form_submit_button("Ajouter la Catégorie") and nom_cat: 
                     cursor = conn.cursor()
-                    cursor.execute("INSERT INTO Categories (nom, tva, afficher_caisse) VALUES (?, ?, ?)", (nom_cat, tva_cat, int(afficher_caisse)))
+                    cursor.execute("INSERT INTO Categories (nom, tva) VALUES (?, ?)", (nom_cat, tva_cat))
                     cursor.execute("INSERT INTO Sous_Categories (nom, categorie_id) VALUES ('Général', ?)", (cursor.lastrowid,))
                     conn.commit()
                     st.rerun()
         with col_gest_cat:
-            df_categories = pd.read_sql_query("SELECT id, nom, tva, afficher_caisse FROM Categories ORDER BY nom", conn)
+            df_categories = pd.read_sql_query("SELECT id, nom, tva FROM Categories ORDER BY nom", conn)
             if not df_categories.empty:
                 cat_dict = dict(zip(df_categories["nom"], df_categories["id"]))
                 choix_cat = st.selectbox("Sélectionnez une catégorie :", options=list(cat_dict.keys()))
@@ -663,10 +683,8 @@ elif menu == "Catalogue Articles":
                     with st.form("edit_cat"):
                         nouveau_nom = st.text_input("Nouveau nom", value=info_cat["nom"])
                         n_tva_cat = st.number_input("TVA (%)", value=float(info_cat["tva"]), step=1.0)
-                        val_caisse = bool(info_cat.get("afficher_caisse", 1))
-                        n_afficher_caisse = st.checkbox("Afficher dans la Caisse", value=val_caisse)
                         if st.form_submit_button("Enregistrer"): 
-                            cursor = conn.cursor(); cursor.execute("UPDATE Categories SET nom = ?, tva = ?, afficher_caisse = ? WHERE id = ?", (nouveau_nom, n_tva_cat, int(n_afficher_caisse), id_cat)); conn.commit(); st.rerun()
+                            cursor = conn.cursor(); cursor.execute("UPDATE Categories SET nom = ?, tva = ? WHERE id = ?", (nouveau_nom, n_tva_cat, id_cat)); conn.commit(); st.rerun()
                         if st.form_submit_button("Supprimer"):
                             cursor = conn.cursor(); cursor.execute("SELECT id FROM Sous_Categories WHERE categorie_id = ?", (id_cat,))
                             if len(cursor.fetchall()) > 1: st.error("❌ Des sous-catégories spécifiques y sont liées.")
@@ -741,12 +759,12 @@ elif menu == "Catalogue Articles":
                     choix_dep_ajout = st.selectbox("Dépôt par défaut", options=list(dep_dict.keys()))
                     
                     c_opts1, c_opts2 = st.columns(2)
-                    est_achetable = c_opts1.checkbox("Achetable (Factures Fournisseur)", value=True)
+                    est_achetable = c_opts1.checkbox("Achetable (Factures)", value=True)
                     est_vendable = c_opts2.checkbox("Vendable (Caisse)", value=True)
                     applique_tva = st.checkbox("Soumis à la TVA (si définie dans catégorie)", value=True)
                     
                     st.markdown("---")
-                    est_conditionnement = st.checkbox("Cet article est un conditionnement (ex: Carton, Pack) d'un autre article")
+                    est_conditionnement = st.checkbox("Cet article est un conditionnement (ex: Carton, Pack)")
                     df_base_prods = pd.read_sql_query("SELECT id, nom FROM Produits WHERE composition_id IS NULL ORDER BY nom", conn)
                     base_dict = dict(zip(df_base_prods["nom"], df_base_prods["id"])) if not df_base_prods.empty else {}
                     
@@ -774,7 +792,7 @@ elif menu == "Catalogue Articles":
                               comp_id, comp_qte))
                         
                         if not comp_id:
-                            cursor.execute("INSERT INTO Stock_Articles (produit_id, depot_id, quantite) VALUES (?, ?, 0)", (cursor.lastrowid, int(dep_dict[choix_dep_ajout])))
+                            cursor.execute("INSERT INTO Stock_Plats (produit_id, depot_id, quantite) VALUES (?, ?, 0)", (cursor.lastrowid, int(dep_dict[choix_dep_ajout])))
                         
                         conn.commit()
                         st.success(f"L'article {nom_prod} a été créé !")
@@ -876,7 +894,7 @@ elif menu == "Catalogue Articles":
                                     cursor.execute("SELECT id FROM Produits WHERE composition_id = ?", (id_prod,))
                                     if cursor.fetchone(): st.error("Impossible : cet article est la base d'un autre conditionnement.")
                                     else:
-                                        cursor.execute("DELETE FROM Stock_Articles WHERE produit_id = ?", (id_prod,))
+                                        cursor.execute("DELETE FROM Stock_Plats WHERE produit_id = ?", (id_prod,))
                                         cursor.execute("DELETE FROM Produits WHERE id = ?", (id_prod,))
                                         conn.commit(); st.rerun()
 
@@ -1020,7 +1038,7 @@ elif menu == "Catalogue Articles":
                             cursor.execute("INSERT INTO Produits (nom, code_barre, prix, prix_achat, unite_achat, unite_vente, categorie_id, sous_categorie_id, depot_id, applique_tva, est_vendable, est_achetable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                            (nom_art, code_barre, p_vente, p_achat, u_achat, u_vente, cat_id, scat_id, dep_id, app_tva, vendable, achatable))
                             p_id = cursor.lastrowid
-                            cursor.execute("INSERT INTO Stock_Articles (produit_id, depot_id, quantite) VALUES (?, ?, 0)", (p_id, dep_id))
+                            cursor.execute("INSERT INTO Stock_Plats (produit_id, depot_id, quantite) VALUES (?, ?, 0)", (p_id, dep_id))
 
                         success_count += 1
 
@@ -1041,6 +1059,34 @@ elif menu == "Catalogue Articles":
 
             except Exception as e:
                 st.error(f"❌ Erreur lors de l'importation : {e}")
+
+    with tab_admin:
+        if role_actif == "Manager":
+            st.warning("⚠️ **ATTENTION - ACTION IRRÉVERSIBLE**\n\nCette action va supprimer **l'intégralité de vos Catégories, Sous-Catégories et Articles**.\nPour éviter toute corruption de la base de données, cela entraînera également **la remise à zéro de l'historique des Ventes et des Stocks**.")
+            with st.form("form_reset_catalogue"):
+                st.write("Pour confirmer, veuillez saisir votre code PIN administrateur :")
+                pin_confirm = st.text_input("Code PIN", type="password")
+                if st.form_submit_button("💥 SUPPRIMER TOUT LE CATALOGUE", type="primary"):
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT pin FROM Utilisateurs WHERE id = ?", (st.session_state.utilisateur["id"],))
+                    real_pin = cursor.fetchone()[0]
+                    if pin_confirm == real_pin:
+                        cursor.execute("DELETE FROM Mouvements_Stock")
+                        cursor.execute("DELETE FROM Lignes_Commande")
+                        cursor.execute("DELETE FROM Stock_Plats")
+                        cursor.execute("DELETE FROM Paiements_Ticket")
+                        cursor.execute("DELETE FROM Commandes")
+                        cursor.execute("DELETE FROM Produits")
+                        cursor.execute("DELETE FROM Sous_Categories")
+                        cursor.execute("DELETE FROM Categories")
+                        cursor.execute("DELETE FROM sqlite_sequence WHERE name IN ('Produits', 'Categories', 'Sous_Categories', 'Stock_Plats', 'Mouvements_Stock', 'Lignes_Commande', 'Commandes', 'Paiements_Ticket')")
+                        conn.commit()
+                        st.success("✅ Le catalogue et l'historique associé ont été entièrement effacés !")
+                        st.rerun()
+                    else:
+                        st.error("❌ Code PIN incorrect. L'action a été annulée.")
+        else:
+            st.error("Accès refusé : Réservé à l'administrateur.")
 
 elif menu == "Achats (Fournisseurs)":
     st.markdown("### 🛒 Achats Fournisseurs")
@@ -1166,10 +1212,10 @@ elif menu == "Achats (Fournisseurs)":
                             base_id = comp_res[0]
                             qte_stock_add = qte_achet * float(comp_res[1])
                             
-                        cursor.execute("SELECT quantite FROM Stock_Articles WHERE produit_id=? AND depot_id=?", (base_id, d_id))
+                        cursor.execute("SELECT quantite FROM Stock_Plats WHERE produit_id=? AND depot_id=?", (base_id, d_id))
                         res_stock = cursor.fetchone()
-                        if res_stock: cursor.execute("UPDATE Stock_Articles SET quantite = quantite + ? WHERE produit_id=? AND depot_id=?", (qte_stock_add, base_id, d_id))
-                        else: cursor.execute("INSERT INTO Stock_Articles (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (base_id, d_id, qte_stock_add))
+                        if res_stock: cursor.execute("UPDATE Stock_Plats SET quantite = quantite + ? WHERE produit_id=? AND depot_id=?", (qte_stock_add, base_id, d_id))
+                        else: cursor.execute("INSERT INTO Stock_Plats (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (base_id, d_id, qte_stock_add))
                             
                     conn.commit()
                     st.session_state.panier_achats = []
@@ -1261,14 +1307,14 @@ elif menu == "Stocks & Mouvements":
                         if id_d_source == id_d_dest: st.error("Même dépôt source et destination !")
                         else:
                             cursor.execute("INSERT INTO Mouvements_Stock (produit_id, depot_id, type_mouvement, quantite, reference) VALUES (?, ?, 'Sortie (Transfert)', ?, ?)", (id_p, id_d_source, qte_mvt, ref_finale))
-                            cursor.execute("SELECT quantite FROM Stock_Articles WHERE produit_id=? AND depot_id=?", (base_id, id_d_source))
-                            if cursor.fetchone(): cursor.execute("UPDATE Stock_Articles SET quantite=quantite-? WHERE produit_id=? AND depot_id=?", (qte_stock_mvt, base_id, id_d_source))
-                            else: cursor.execute("INSERT INTO Stock_Articles (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (base_id, id_d_source, -qte_stock_mvt))
+                            cursor.execute("SELECT quantite FROM Stock_Plats WHERE produit_id=? AND depot_id=?", (base_id, id_d_source))
+                            if cursor.fetchone(): cursor.execute("UPDATE Stock_Plats SET quantite=quantite-? WHERE produit_id=? AND depot_id=?", (qte_stock_mvt, base_id, id_d_source))
+                            else: cursor.execute("INSERT INTO Stock_Plats (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (base_id, id_d_source, -qte_stock_mvt))
                             
                             cursor.execute("INSERT INTO Mouvements_Stock (produit_id, depot_id, type_mouvement, quantite, reference) VALUES (?, ?, 'Entrée (Transfert)', ?, ?)", (id_p, id_d_dest, qte_mvt, ref_finale))
-                            cursor.execute("SELECT quantite FROM Stock_Articles WHERE produit_id=? AND depot_id=?", (base_id, id_d_dest))
-                            if cursor.fetchone(): cursor.execute("UPDATE Stock_Articles SET quantite=quantite+? WHERE produit_id=? AND depot_id=?", (qte_stock_mvt, base_id, id_d_dest))
-                            else: cursor.execute("INSERT INTO Stock_Articles (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (base_id, id_d_dest, qte_stock_mvt))
+                            cursor.execute("SELECT quantite FROM Stock_Plats WHERE produit_id=? AND depot_id=?", (base_id, id_d_dest))
+                            if cursor.fetchone(): cursor.execute("UPDATE Stock_Plats SET quantite=quantite+? WHERE produit_id=? AND depot_id=?", (qte_stock_mvt, base_id, id_d_dest))
+                            else: cursor.execute("INSERT INTO Stock_Plats (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (base_id, id_d_dest, qte_stock_mvt))
                             
                             conn.commit(); st.success("Transfert validé !"); st.rerun()
                     else:
@@ -1277,9 +1323,9 @@ elif menu == "Stocks & Mouvements":
                         cursor.execute("INSERT INTO Mouvements_Stock (produit_id, depot_id, type_mouvement, quantite, reference) VALUES (?, ?, ?, ?, ?)", (id_p, id_d, t_mvt_db, qte_mvt, ref_finale))
                         
                         val = qte_stock_mvt if "Entrée" in type_mvt_ext else -qte_stock_mvt
-                        cursor.execute("SELECT quantite FROM Stock_Articles WHERE produit_id=? AND depot_id=?", (base_id, id_d))
-                        if cursor.fetchone(): cursor.execute("UPDATE Stock_Articles SET quantite=quantite+? WHERE produit_id=? AND depot_id=?", (val, base_id, id_d))
-                        else: cursor.execute("INSERT INTO Stock_Articles (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (base_id, id_d, val))
+                        cursor.execute("SELECT quantite FROM Stock_Plats WHERE produit_id=? AND depot_id=?", (base_id, id_d))
+                        if cursor.fetchone(): cursor.execute("UPDATE Stock_Plats SET quantite=quantite+? WHERE produit_id=? AND depot_id=?", (val, base_id, id_d))
+                        else: cursor.execute("INSERT INTO Stock_Plats (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (base_id, id_d, val))
                         conn.commit(); st.success(f"Mouvement enregistré !"); st.rerun()
 
     with tab_hist_stock:
@@ -1350,53 +1396,19 @@ elif menu == "Stocks & Mouvements":
             </body>
             </html>
             """
-            col_export2.download_button(label="🖨️ Exporter PDF / Imprimer", data=html_report, file_name=f"Journal_Mouvements_{date_str_file_mvt}.html", mime="text/html", use_container_width=True)
+            col_export2.download_button(label="🖨️ Exporter en PDF / Imprimer (Version HTML)", data=html_report, file_name=f"Journal_Mouvements_{date_str_file_mvt}.html", mime="text/html", use_container_width=True)
 
     with tab_etat:
-        st.info("💡 Le système calcule automatiquement vos stocks en affichant les conditionnements complets (Bouteilles, Packs) et le reste en unités (Verres, Pièces).")
+        st.info("💡 Les quantités affichées concernent uniquement les unités de base (les conditionnements sont automatiquement convertis en unités lors des transactions).")
         df_etat_stock = pd.read_sql_query("""
-            SELECT 
-                d.nom as 'Dépôt', 
-                p.nom as 'Article (Base)', 
-                p.unite_vente as 'Unité', 
-                c.nom as 'Catégorie', 
-                COALESCE(sc.nom, 'Général') as 'Sous-Catégorie', 
-                s.quantite as 'En Stock',
-                (SELECT unite_vente FROM Produits WHERE composition_id = p.id LIMIT 1) as 'Cond_Unite',
-                (SELECT composition_qte FROM Produits WHERE composition_id = p.id LIMIT 1) as 'Cond_Qte'
-            FROM Stock_Articles s 
-            JOIN Produits p ON s.produit_id = p.id 
-            JOIN Categories c ON p.categorie_id = c.id 
-            LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id 
-            JOIN Depots d ON s.depot_id = d.id 
-            WHERE p.composition_id IS NULL 
-            ORDER BY d.nom, c.nom, COALESCE(sc.nom, 'Général'), p.nom
+            SELECT d.nom as 'Dépôt', p.nom as 'Article (Base)', p.unite_vente as 'Unité', c.nom as 'Catégorie', COALESCE(sc.nom, 'Général') as 'Sous-Catégorie', s.quantite as 'En Stock' 
+            FROM Stock_Plats s JOIN Produits p ON s.produit_id = p.id JOIN Categories c ON p.categorie_id = c.id LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id JOIN Depots d ON s.depot_id = d.id 
+            WHERE p.composition_id IS NULL ORDER BY d.nom, c.nom, COALESCE(sc.nom, 'Général'), p.nom
         """, conn)
         
         if not df_etat_stock.empty:
             df_etat_stock['En Stock Brut'] = df_etat_stock['En Stock'] 
-            
-            def format_stock_detail(row):
-                qte = float(row['En Stock Brut'])
-                base_unit = str(row['Unité'])
-                cond_qte = row['Cond_Qte']
-                cond_unit = row['Cond_Unite']
-                
-                # Si un conditionnement existe pour cet article de base
-                if pd.notna(cond_qte) and float(cond_qte) > 0 and pd.notna(cond_unit):
-                    cq = float(cond_qte)
-                    nb_cond = int(qte // cq)  # Nombre de bouteilles pleines
-                    reste = qte % cq          # Reste en verres
-                    
-                    if nb_cond > 0:
-                        if reste > 0:
-                            return f"{nb_cond} {cond_unit} + {fmt_qte(reste)} {base_unit}"
-                        else:
-                            return f"{nb_cond} {cond_unit}"
-                # Si pas de conditionnement, on affiche juste l'unité de base
-                return f"{fmt_qte(qte)} {base_unit}"
-                
-            df_etat_stock['En Stock'] = df_etat_stock.apply(format_stock_detail, axis=1)
+            df_etat_stock['En Stock'] = df_etat_stock['En Stock'].apply(fmt_qte)
             
             col_e1, col_e2 = st.columns(2)
             categories_dispo = ["Toutes"] + sorted(list(df_etat_stock["Catégorie"].unique()))
@@ -1408,10 +1420,8 @@ elif menu == "Stocks & Mouvements":
             df_filtre_etat = df_etat_stock.copy()
             if f_cat_etat != "Toutes": df_filtre_etat = df_filtre_etat[df_filtre_etat["Catégorie"] == f_cat_etat]
             if f_scat_etat != "Toutes": df_filtre_etat = df_filtre_etat[df_filtre_etat["Sous-Catégorie"] == f_scat_etat]
-            
-            # Nettoyage des colonnes temporaires avant l'affichage
-            df_a_afficher = df_filtre_etat.drop(columns=["En Stock Brut", "Cond_Unite", "Cond_Qte"], errors="ignore")
-            st.dataframe(df_a_afficher, use_container_width=True, hide_index=True)
+                
+            st.dataframe(df_filtre_etat.drop(columns=["En Stock Brut"], errors="ignore"), use_container_width=True, hide_index=True)
             
             date_str_file = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
             date_str_display = datetime.datetime.now().strftime(sys_format_date)
@@ -1420,7 +1430,7 @@ elif menu == "Stocks & Mouvements":
             
             col_export_e1.download_button(
                 label="📥 Exporter en Excel (CSV)", 
-                data=convert_df_to_csv(df_a_afficher), 
+                data=convert_df_to_csv(df_filtre_etat.drop(columns=["En Stock Brut"], errors="ignore")), 
                 file_name=f"Etat_du_Stock_{date_str_file}.csv", 
                 mime="text/csv", 
                 use_container_width=True
@@ -1443,7 +1453,7 @@ elif menu == "Stocks & Mouvements":
             <body>
                 <h2>État du Stock - Édité le {date_str_display}</h2>
                 <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter en PDF / Imprimer</button>
-                {df_a_afficher.to_html(index=False)}
+                {df_filtre_etat.drop(columns=["En Stock Brut"], errors="ignore").to_html(index=False)}
             </body>
             </html>
             """
@@ -1457,135 +1467,31 @@ elif menu == "Stocks & Mouvements":
 
     with tab_admin:
         if role_actif == "Manager":
-            st.warning("⚠️ Attention, ces actions vont supprimer l'historique sélectionné et recalculer les stocks en fonction de ce qui reste. Ces actions sont irréversibles.")
-            
-            col_b1, col_b2, col_b3 = st.columns(3)
-            
-            if col_b1.button("🔥 Nettoyer TOUTES les VENTES", use_container_width=True):
-                cursor = conn.cursor()
-                cursor.execute("SELECT m.produit_id, m.depot_id, m.quantite, p.composition_id, p.composition_qte FROM Mouvements_Stock m JOIN Produits p ON m.produit_id=p.id WHERE m.type_mouvement='Sortie (Vente)'")
-                for pid, did, qte, cid, cqte in cursor.fetchall():
-                    base_id = cid if cid else pid
-                    mult = float(cqte) if cid else 1.0
-                    cursor.execute("UPDATE Stock_Articles SET quantite = quantite + ? WHERE produit_id=? AND depot_id=?", (qte*mult, base_id, did))
-                cursor.execute("DELETE FROM Mouvements_Stock WHERE type_mouvement='Sortie (Vente)'")
-                cursor.execute("DELETE FROM Lignes_Commande")
-                cursor.execute("DELETE FROM Paiements_Ticket")
-                cursor.execute("DELETE FROM Commandes")
-                cursor.execute("UPDATE Tables_Resto SET statut = 'Libre', demande_addition = 0")
-                conn.commit(); st.success("Ventes effacées et stock restitué !"); st.rerun()
-
-            if col_b2.button("🔥 Nettoyer TOUS les ACHATS", use_container_width=True):
-                cursor = conn.cursor()
-                cursor.execute("SELECT m.produit_id, m.depot_id, m.quantite, p.composition_id, p.composition_qte FROM Mouvements_Stock m JOIN Produits p ON m.produit_id=p.id WHERE m.type_mouvement='Entrée (Achat)'")
-                for pid, did, qte, cid, cqte in cursor.fetchall():
-                    base_id = cid if cid else pid
-                    mult = float(cqte) if cid else 1.0
-                    cursor.execute("UPDATE Stock_Articles SET quantite = quantite - ? WHERE produit_id=? AND depot_id=?", (qte*mult, base_id, did))
-                cursor.execute("DELETE FROM Mouvements_Stock WHERE type_mouvement='Entrée (Achat)'")
-                conn.commit(); st.success("Achats effacés et stock décrémenté !"); st.rerun()
-
-            if col_b3.button("💥 REMISE À ZÉRO TOTALE (Mouvements & Stocks)", use_container_width=True):
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM Mouvements_Stock")
-                cursor.execute("DELETE FROM sqlite_sequence WHERE name='Mouvements_Stock'")
-                cursor.execute("DELETE FROM Lignes_Commande")
-                cursor.execute("DELETE FROM Paiements_Ticket")
-                cursor.execute("DELETE FROM Commandes")
-                cursor.execute("DELETE FROM sqlite_sequence WHERE name='Commandes'")
-                cursor.execute("UPDATE Tables_Resto SET statut = 'Libre', demande_addition = 0")
-                cursor.execute("DELETE FROM Stock_Articles")
-                conn.commit(); st.success("Système entièrement réinitialisé à zéro !"); st.rerun()
-        else:
-            st.error("Réservé à l'administrateur.")
-
-elif menu == "Salles, Tables & Chambres":
-    st.markdown("### 🪑 Configuration Salles & Chambres")
-    tab_salles, tab_tables, tab_plan, tab_chambres = st.tabs(["1. Zones & Salles", "2. Gestion Tables", "3. Plan d'ensemble", "4. Chambres d'Hôtel"])
-    with tab_salles:
-        col_ajout_salle, col_gest_salle = st.columns(2)
-        with col_ajout_salle:
-            with st.form("form_ajout_salle", clear_on_submit=True):
-                nom_salle = st.text_input("Nom de la zone (ex: Terrasse, Salle Principale)")
-                if st.form_submit_button("Ajouter la zone") and nom_salle:
+            st.warning("⚠️ **ATTENTION - ACTION IRRÉVERSIBLE**\n\nCette action va supprimer **l'intégralité de vos Catégories, Sous-Catégories et Articles**.\nPour éviter toute corruption de la base de données, cela entraînera également **la remise à zéro de l'historique des Ventes et des Stocks**.")
+            with st.form("form_reset_catalogue"):
+                st.write("Pour confirmer, veuillez saisir votre code PIN administrateur :")
+                pin_confirm = st.text_input("Code PIN", type="password")
+                if st.form_submit_button("💥 SUPPRIMER TOUT LE CATALOGUE", type="primary"):
                     cursor = conn.cursor()
-                    cursor.execute("SELECT id FROM Salles WHERE nom = ?", (nom_salle,))
-                    if cursor.fetchone(): st.error("Cette zone existe déjà !")
-                    else: cursor.execute("INSERT INTO Salles (nom) VALUES (?)", (nom_salle,)); conn.commit(); st.rerun()
-        with col_gest_salle:
-            df_salles = pd.read_sql_query("SELECT id, nom FROM Salles ORDER BY nom", conn)
-            if not df_salles.empty:
-                salle_dict = dict(zip(df_salles["nom"], df_salles["id"]))
-                choix_salle = st.selectbox("Sélectionnez une zone :", options=list(salle_dict.keys()))
-                id_salle = int(salle_dict[choix_salle])
-                with st.expander("✏️ Modifier / 🗑️ Supprimer"):
-                    with st.form("edit_salle"):
-                        nouveau_nom = st.text_input("Nouveau nom", value=choix_salle)
-                        if st.form_submit_button("Enregistrer"): cursor = conn.cursor(); cursor.execute("UPDATE Salles SET nom = ? WHERE id = ?", (nouveau_nom, id_salle)); conn.commit(); st.rerun()
-                        if st.form_submit_button("Supprimer"): 
-                            cursor = conn.cursor(); cursor.execute("SELECT id FROM Tables_Resto WHERE salle_id = ?", (id_salle,))
-                            if cursor.fetchone(): st.error("❌ Cette zone contient des tables.")
-                            else: cursor.execute("DELETE FROM Salles WHERE id = ?", (id_salle,)); conn.commit(); st.rerun()
-
-    with tab_tables:
-        col_ajout_tab, col_gest_tab = st.columns(2)
-        df_salles = pd.read_sql_query("SELECT id, nom FROM Salles ORDER BY nom", conn)
-        with col_ajout_tab:
-            if not df_salles.empty:
-                with st.form("form_ajout_table", clear_on_submit=True):
-                    salle_dict = dict(zip(df_salles["nom"], df_salles["id"]))
-                    choix_salle = st.selectbox("Dans quelle zone ?", options=list(salle_dict.keys()))
-                    num_table = st.text_input("Numéro ou Nom (ex: T1)")
-                    capacite = st.number_input("Capacité", min_value=1, value=2)
-                    if st.form_submit_button("Enregistrer la table") and num_table:
-                        cursor = conn.cursor(); cursor.execute("INSERT INTO Tables_Resto (numero_table, capacite, salle_id) VALUES (?, ?, ?)", (num_table, capacite, int(salle_dict[choix_salle]))); conn.commit(); st.rerun()
-        with col_gest_tab:
-            df_tables_exist = pd.read_sql_query("SELECT id, numero_table, capacite, salle_id FROM Tables_Resto ORDER BY numero_table", conn)
-            if not df_tables_exist.empty and not df_salles.empty:
-                table_dict = dict(zip(df_tables_exist["numero_table"], df_tables_exist["id"]))
-                salle_dict_inv = dict(zip(df_salles["id"], df_salles["nom"]))
-                salle_dict_norm = dict(zip(df_salles["nom"], df_salles["id"]))
-                choix_table = st.selectbox("Sélectionnez la table :", options=list(table_dict.keys()))
-                id_table = int(table_dict[choix_table])
-                table_info = df_tables_exist[df_tables_exist["id"] == id_table].iloc[0]
-                with st.expander("✏️ Modifier / 🗑️ Supprimer"):
-                    with st.form("edit_table"):
-                        nouveau_num = st.text_input("Numéro", value=table_info["numero_table"])
-                        nouvelle_cap = st.number_input("Capacité", min_value=1, value=int(table_info["capacite"]))
-                        salle_actuelle = salle_dict_inv.get(table_info["salle_id"], list(salle_dict_norm.keys())[0])
-                        idx_salle = list(salle_dict_norm.keys()).index(salle_actuelle) if salle_actuelle in salle_dict_norm else 0
-                        nouvelle_salle = st.selectbox("Zone", options=list(salle_dict_norm.keys()), index=idx_salle)
-                        if st.form_submit_button("Enregistrer"): cursor = conn.cursor(); cursor.execute("UPDATE Tables_Resto SET numero_table = ?, capacite = ?, salle_id = ? WHERE id = ?", (nouveau_num, nouvelle_cap, salle_dict_norm[nouvelle_salle], id_table)); conn.commit(); st.rerun()
-                        if st.form_submit_button("Supprimer"): 
-                            cursor = conn.cursor(); cursor.execute("SELECT id FROM Commandes WHERE table_id = ?", (id_table,))
-                            if cursor.fetchone(): st.error("❌ Des tickets sont liés à cette table.")
-                            else: cursor.execute("DELETE FROM Tables_Resto WHERE id = ?", (id_table,)); conn.commit(); st.rerun()
-
-    with tab_plan:
-        df_tables = pd.read_sql_query("SELECT t.numero_table as 'Table', t.capacite as 'Capacité', t.statut as 'Statut', s.nom as 'Zone' FROM Tables_Resto t LEFT JOIN Salles s ON t.salle_id = s.id ORDER BY s.nom, t.numero_table", conn)
-        if not df_tables.empty: st.dataframe(df_tables, use_container_width=True, hide_index=True)
-            
-    with tab_chambres:
-        col_ajout_chm, col_gest_chm = st.columns(2)
-        with col_ajout_chm:
-            with st.form("form_ajout_chambre", clear_on_submit=True):
-                num_chambre = st.text_input("Numéro ou Nom de la chambre (ex: 101)")
-                if st.form_submit_button("Ajouter la chambre") and num_chambre:
-                    cursor = conn.cursor(); cursor.execute("SELECT id FROM Chambres_Hotel WHERE numero_chambre = ?", (num_chambre,))
-                    if cursor.fetchone(): st.error("Cette chambre existe déjà !")
-                    else: cursor.execute("INSERT INTO Chambres_Hotel (numero_chambre) VALUES (?)", (num_chambre,)); conn.commit(); st.rerun()
-        with col_gest_chm:
-            df_chambres = pd.read_sql_query("SELECT id, numero_chambre FROM Chambres_Hotel ORDER BY numero_chambre", conn)
-            if not df_chambres.empty:
-                chm_dict = dict(zip(df_chambres["numero_chambre"], df_chambres["id"]))
-                choix_chm = st.selectbox("Sélectionnez une chambre :", options=list(chm_dict.keys()))
-                id_chm = int(chm_dict[choix_chm])
-                with st.expander("🗑️ Supprimer la chambre"):
-                    with st.form("form_del_chambre"):
-                        if st.form_submit_button("Confirmer la suppression"):
-                            cursor = conn.cursor(); cursor.execute("SELECT id FROM Commandes WHERE chambre_id = ?", (id_chm,))
-                            if cursor.fetchone(): st.error("❌ Cette chambre a un historique de commandes.")
-                            else: cursor.execute("DELETE FROM Chambres_Hotel WHERE id = ?", (id_chm,)); conn.commit(); st.rerun()
+                    cursor.execute("SELECT pin FROM Utilisateurs WHERE id = ?", (st.session_state.utilisateur["id"],))
+                    real_pin = cursor.fetchone()[0]
+                    if pin_confirm == real_pin:
+                        cursor.execute("DELETE FROM Mouvements_Stock")
+                        cursor.execute("DELETE FROM Lignes_Commande")
+                        cursor.execute("DELETE FROM Stock_Plats")
+                        cursor.execute("DELETE FROM Paiements_Ticket")
+                        cursor.execute("DELETE FROM Commandes")
+                        cursor.execute("DELETE FROM Produits")
+                        cursor.execute("DELETE FROM Sous_Categories")
+                        cursor.execute("DELETE FROM Categories")
+                        cursor.execute("DELETE FROM sqlite_sequence WHERE name IN ('Produits', 'Categories', 'Sous_Categories', 'Stock_Plats', 'Mouvements_Stock', 'Lignes_Commande', 'Commandes', 'Paiements_Ticket')")
+                        conn.commit()
+                        st.success("✅ Le catalogue et l'historique associé ont été entièrement effacés !")
+                        st.rerun()
+                    else:
+                        st.error("❌ Code PIN incorrect. L'action a été annulée.")
+        else:
+            st.error("Accès refusé : Réservé à l'administrateur.")
 
 elif menu == "Clients (CRM)":
     st.markdown("### 👥 Base de données Clients")
@@ -1644,73 +1550,6 @@ elif menu == "Clients (CRM)":
 elif menu == "Prise de Commande":
     cursor = conn.cursor()
     
-    if role_actif != "Serveur":
-        cursor.execute("SELECT id, numero_table FROM Tables_Resto WHERE demande_addition = 1")
-        demandes = cursor.fetchall()
-        if demandes:
-            st.error("🛎️ **DEMANDES D'ADDITION EN ATTENTE**")
-            cols_demandes = st.columns(min(len(demandes), 4))
-            for idx, (t_id, t_num) in enumerate(demandes):
-                with cols_demandes[idx % 4]:
-                    st.info(f"Table {t_num} demande l'addition !")
-                    if st.button(f"✔️ Ouvrir Ticket ({t_num})", key=f"ok_add_{t_id}"):
-                        cursor.execute("UPDATE Tables_Resto SET demande_addition = 0 WHERE id = ?", (t_id,))
-                        
-                        cursor.execute("SELECT id, client_id FROM Commandes WHERE table_id = ? AND statut = 'En attente'", (t_id,))
-                        cmd_existante = cursor.fetchone()
-                        if cmd_existante:
-                            cmd_id_load = cmd_existante[0]
-                            c_id = cmd_existante[1]
-                            
-                            st.session_state.commande_id_en_cours = cmd_id_load
-                            st.session_state.table_active = t_id
-                            st.session_state.radio_type_cmd = "Sur Place"
-                            
-                            label_found = "Passager (Anonyme)"
-                            if c_id:
-                                cursor.execute("SELECT id, nom, telephone FROM Clients WHERE id = ?", (c_id,))
-                                c_res = cursor.fetchone()
-                                if c_res:
-                                    label_found = f"CLI-{c_res[0]:04d} : {c_res[1]} ({c_res[2]})"
-                            st.session_state.active_client_name = label_found
-                            
-                            df_lignes = pd.read_sql_query(
-                                "SELECT lc.produit_id as id, p.nom, p.prix as prix_base, lc.prix_unitaire as prix, lc.quantite as qte, lc.quantite_envoyee, lc.quantite_offert_envoyee, lc.quantite_retour_envoyee, p.applique_tva, c.tva as tva_rate FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id JOIN Categories c ON p.categorie_id = c.id WHERE lc.commande_id = ?",
-                                conn,
-                                params=(cmd_id_load,),
-                            )
-                            st.session_state.panier = {}
-                            st.session_state.paiements_partiels = []
-                            st.session_state.pourboire_ticket = 0.0
-                            for _, row in df_lignes.iterrows():
-                                p_id = int(row["id"])
-                                qte = int(row["qte"])
-                                prix_ligne = float(row["prix"])
-                                prix_b = float(row["prix_base"])
-                                
-                                qte_env = int(row["quantite_envoyee"]) if not pd.isna(row.get("quantite_envoyee")) else 0
-                                qte_off_env = int(row["quantite_offert_envoyee"]) if not pd.isna(row.get("quantite_offert_envoyee")) else 0
-                                qte_ret_env = int(row["quantite_retour_envoyee"]) if not pd.isna(row.get("quantite_retour_envoyee")) else 0
-
-                                if p_id not in st.session_state.panier:
-                                    st.session_state.panier[p_id] = {
-                                        "nom": row["nom"], "prix_base": prix_b, "qte": 0, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row["applique_tva"]), "tva_rate": float(row["tva_rate"])
-                                    }
-                                if qte > 0:
-                                    if prix_ligne == 0:
-                                        st.session_state.panier[p_id]["qte_offert"] += qte
-                                        st.session_state.panier[p_id]["qte_offert_envoyee"] += qte_off_env
-                                    else:
-                                        st.session_state.panier[p_id]["qte"] += qte
-                                        st.session_state.panier[p_id]["qte_envoyee"] += qte_env
-                                elif qte < 0:
-                                    st.session_state.panier[p_id]["qte_retour"] += abs(qte)
-                                    st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
-                        
-                        conn.commit()
-                        st.rerun()
-            st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
-
     col_titre, col_synchro = st.columns([4, 1])
     with col_titre:
         st.markdown("### 📝 Caisse & Prise de Commande")
@@ -1719,11 +1558,7 @@ elif menu == "Prise de Commande":
         if st.button("🔄 Actualiser", use_container_width=True): 
             st.rerun()
 
-    if role_actif == "Serveur":
-        tab_caisse, = st.tabs(["🛒 Écran de Saisie"])
-        tab_historique = None
-    else:
-        tab_caisse, tab_historique = st.tabs(["🛒 Écran de Caisse", "📜 Historique & Duplicatas"])
+    tab_caisse, tab_historique = st.tabs(["🛒 Écran de Caisse", "📜 Historique & Duplicatas"])
 
     with tab_caisse:
         panier_actif = len(st.session_state.panier) > 0
@@ -1736,16 +1571,13 @@ elif menu == "Prise de Commande":
             if panier_actif: 
                 st.info("📌 Encaissez ou mettez en attente avant de changer de commande.")
 
-            with st.expander("📝 Infos Commande (Client, Table...)", expanded=not panier_actif):
+            with st.expander("📝 Infos Commande (Client, Zone...)", expanded=not panier_actif):
                 col_type, col_info = st.columns([1, 1])
-                
-                choix_types = ["Sur Place", "À Emporter", "Livraison", "Room Service"]
+                choix_types = ["Caisse", "Livraison"]
                 idx_type = choix_types.index(st.session_state.radio_type_cmd) if st.session_state.radio_type_cmd in choix_types else 0
                 type_cmd = col_type.radio("Type :", choix_types, index=idx_type, disabled=panier_actif)
                 st.session_state.radio_type_cmd = type_cmd
 
-                table_selectionnee_id = None
-                chambre_selectionnee_id = None
                 client_nom, client_tel, client_adr, client_id_db = "", "", "", None
                 zone_id_selected = None
                 frais_livraison_actuel = 0.0
@@ -1759,8 +1591,10 @@ elif menu == "Prise de Commande":
                         options_clients.append(label)
                         dict_clients[label] = row["id"]
 
-                    try: default_client_idx = options_clients.index(st.session_state.active_client_name)
-                    except ValueError: default_client_idx = 0
+                    try: 
+                        default_client_idx = options_clients.index(st.session_state.active_client_name)
+                    except ValueError: 
+                        default_client_idx = 0
 
                     choix_client = st.selectbox("Client :", options_clients, index=default_client_idx)
                     st.session_state.active_client_name = choix_client
@@ -1769,20 +1603,24 @@ elif menu == "Prise de Commande":
                     if choix_client == "+ Nouveau Client...":
                         client_nom = st.text_input("Nom du client *")
                         client_tel = st.text_input("Téléphone *")
-                        if type_cmd == "Livraison": client_adr = st.text_input("Adresse de livraison *")
+                        if type_cmd == "Livraison": 
+                            client_adr = st.text_input("Adresse de livraison *")
                     elif choix_client != "Passager (Anonyme)":
                         client_id_db = int(dict_clients[choix_client])
                         info_c = df_clients_crm[df_clients_crm["id"] == client_id_db].iloc[0]
-                        client_nom, client_tel = info_c["nom"], info_c["telephone"]
+                        client_nom = info_c["nom"]
+                        client_tel = info_c["telephone"]
                         client_adr = info_c["adresse"] if not pd.isna(info_c["adresse"]) else ""
                         client_zone_id_db = info_c['zone_id'] if not pd.isna(info_c['zone_id']) else None
-                        if type_cmd == "Livraison": client_adr = st.text_input("Adresse de livraison", value=client_adr)
+                        if type_cmd == "Livraison": 
+                            client_adr = st.text_input("Adresse de livraison", value=client_adr)
 
                     if type_cmd == "Livraison":
                         df_zones = pd.read_sql_query("SELECT id, nom, tarif FROM Zones_Livraison ORDER BY nom", conn)
                         options_zones = {"-- Aucune Zone --": (None, 0.0)}
                         if not df_zones.empty:
-                            for _, r in df_zones.iterrows(): options_zones[f"{r['nom']} ({fmt_prix(r['tarif'])} F)"] = (r['id'], r['tarif'])
+                            for _, r in df_zones.iterrows(): 
+                                options_zones[f"{r['nom']} ({fmt_prix(r['tarif'])} F)"] = (r['id'], r['tarif'])
                         
                         idx_zone = 0
                         if st.session_state.commande_id_en_cours:
@@ -1790,159 +1628,17 @@ elif menu == "Prise de Commande":
                             res_cz = cursor.fetchone()
                             if res_cz and res_cz[0] is not None:
                                 for i, key in enumerate(options_zones.keys()):
-                                    if options_zones[key][0] == res_cz[0]: idx_zone = i
+                                    if options_zones[key][0] == res_cz[0]: 
+                                        idx_zone = i
                         elif client_zone_id_db is not None:
                             for i, key in enumerate(options_zones.keys()):
-                                if options_zones[key][0] == client_zone_id_db: idx_zone = i
+                                if options_zones[key][0] == client_zone_id_db: 
+                                    idx_zone = i
                                 
                         choix_zone_liv = st.selectbox("Zone de livraison :", options=list(options_zones.keys()), index=idx_zone)
                         zone_id_selected, frais_livraison_actuel = options_zones[choix_zone_liv]
 
-                    if type_cmd == "Room Service":
-                        df_chambres = pd.read_sql_query("SELECT id, numero_chambre FROM Chambres_Hotel ORDER BY numero_chambre", conn)
-                        if not df_chambres.empty:
-                            dict_chm = dict(zip(df_chambres["numero_chambre"], df_chambres["id"]))
-                            idx_chm = 0
-                            if st.session_state.chambre_active:
-                                for i, (nom_c, id_c) in enumerate(dict_chm.items()):
-                                    if id_c == st.session_state.chambre_active: idx_chm = i; break
-                            choix_c = st.selectbox("Chambre :", options=list(dict_chm.keys()), index=idx_chm if st.session_state.chambre_active else None, disabled=panier_actif, placeholder="Choisir une chambre...")
-                            if choix_c:
-                                chambre_selectionnee_id = int(dict_chm[choix_c])
-                                st.session_state.chambre_active = chambre_selectionnee_id
-                            else: chambre_selectionnee_id = None
-
-                            if chambre_selectionnee_id:
-                                cursor.execute("SELECT id FROM Commandes WHERE chambre_id = ? AND statut = 'En attente'", (chambre_selectionnee_id,))
-                                cmd_existante = cursor.fetchone()
-                                if cmd_existante:
-                                    st.warning(f"⚠️ Ticket en attente (#{cmd_existante[0]}).")
-                                    if st.button("🔄 Charger le ticket"):
-                                        st.session_state.commande_id_en_cours = cmd_existante[0]
-                                        st.session_state.paiements_partiels = []
-                                        st.session_state.pourboire_ticket = 0.0
-                                        cursor.execute("SELECT client_id FROM Commandes WHERE id = ?", (cmd_existante[0],))
-                                        c_id_res = cursor.fetchone()
-                                        if c_id_res and c_id_res[0]:
-                                            c_id = c_id_res[0]
-                                            label_found = "Passager (Anonyme)"
-                                            for lbl, db_id in dict_clients.items():
-                                                if db_id == c_id: label_found = lbl; break
-                                            st.session_state.active_client_name = label_found
-                                        else: st.session_state.active_client_name = "Passager (Anonyme)"
-
-                                        df_lignes = pd.read_sql_query("SELECT lc.produit_id as id, p.nom, p.prix as prix_base, lc.prix_unitaire as prix, lc.quantite as qte, lc.quantite_envoyee, lc.quantite_offert_envoyee, lc.quantite_retour_envoyee, p.applique_tva, c.tva as tva_rate FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id JOIN Categories c ON p.categorie_id = c.id WHERE lc.commande_id = ?", conn, params=(cmd_existante[0],))
-                                        st.session_state.panier = {}
-                                        for _, row in df_lignes.iterrows():
-                                            p_id, qte, prix_ligne, prix_b = int(row["id"]), int(row["qte"]), float(row["prix"]), float(row["prix_base"])
-                                            qte_env = int(row["quantite_envoyee"]) if not pd.isna(row.get("quantite_envoyee")) else 0
-                                            qte_off_env = int(row["quantite_offert_envoyee"]) if not pd.isna(row.get("quantite_offert_envoyee")) else 0
-                                            qte_ret_env = int(row["quantite_retour_envoyee"]) if not pd.isna(row.get("quantite_retour_envoyee")) else 0
-
-                                            if p_id not in st.session_state.panier: st.session_state.panier[p_id] = {"nom": row["nom"], "prix_base": prix_b, "qte": 0, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row["applique_tva"]), "tva_rate": float(row["tva_rate"])}
-                                            if qte > 0:
-                                                if prix_ligne == 0: st.session_state.panier[p_id]["qte_offert"] += qte; st.session_state.panier[p_id]["qte_offert_envoyee"] += qte_off_env
-                                                else: st.session_state.panier[p_id]["qte"] += qte; st.session_state.panier[p_id]["qte_envoyee"] += qte_env
-                                            elif qte < 0: st.session_state.panier[p_id]["qte_retour"] += abs(qte); st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
-                                        st.rerun()
-                                else: st.session_state.commande_id_en_cours = None
-                        else: st.warning("Aucune chambre configurée.")
-
-                if type_cmd == "Sur Place":
-                    df_salles = pd.read_sql_query("SELECT id, nom FROM Salles ORDER BY nom", conn)
-                    if not df_salles.empty:
-                        dict_salles = dict(zip(df_salles["nom"], df_salles["id"]))
-                        idx_salle, idx_table, active_salle_id = 0, 0, None
-                        
-                        if st.session_state.table_active:
-                            cursor.execute("SELECT salle_id FROM Tables_Resto WHERE id = ?", (st.session_state.table_active,))
-                            res_salle = cursor.fetchone()
-                            if res_salle:
-                                active_salle_id = res_salle[0]
-                                for i, (nom_s, id_s) in enumerate(dict_salles.items()):
-                                    if id_s == active_salle_id: idx_salle = i; break
-
-                        col_zs, col_zt = st.columns(2)
-                        choix_salle = col_zs.selectbox("Zone :", options=list(dict_salles.keys()), index=idx_salle, disabled=panier_actif)
-                        salle_selected_id = dict_salles[choix_salle]
-
-                        df_tables = pd.read_sql_query("SELECT id, numero_table, statut FROM Tables_Resto WHERE salle_id = ? ORDER BY numero_table", conn, params=(salle_selected_id,))
-                        if not df_tables.empty:
-                            df_tables["label"] = df_tables["numero_table"] + " (" + df_tables["statut"] + ")"
-                            dict_tables_resto = dict(zip(df_tables["label"], df_tables["id"]))
-
-                            if st.session_state.table_active and active_salle_id == salle_selected_id:
-                                for i, (label_t, id_t) in enumerate(dict_tables_resto.items()):
-                                    if id_t == st.session_state.table_active: idx_table = i; break
-
-                            choix_t = col_zt.selectbox("Table :", options=list(dict_tables_resto.keys()), index=idx_table if st.session_state.table_active else None, disabled=panier_actif, placeholder="Choisir une table...")
-                            if choix_t:
-                                table_selectionnee_id = int(dict_tables_resto[choix_t])
-                                st.session_state.table_active = table_selectionnee_id
-                            else: table_selectionnee_id = None
-                            
-                            if st.session_state.commande_id_en_cours and panier_actif:
-                                with st.expander("🔄 Transférer ce ticket vers une autre table"):
-                                    df_salles_dest = pd.read_sql_query("SELECT id, nom FROM Salles ORDER BY nom", conn)
-                                    if not df_salles_dest.empty:
-                                        salles_dest_dict = dict(zip(df_salles_dest["nom"], df_salles_dest["id"]))
-                                        choix_salle_dest = st.selectbox("Zone dest. :", options=list(salles_dest_dict.keys()), key="dest_salle")
-                                        df_tables_dest = pd.read_sql_query("SELECT id, numero_table FROM Tables_Resto WHERE salle_id = ? AND statut = 'Libre' ORDER BY numero_table", conn, params=(salles_dest_dict[choix_salle_dest],))
-                                        if not df_tables_dest.empty:
-                                            tables_dest_dict = dict(zip(df_tables_dest["numero_table"], df_tables_dest["id"]))
-                                            choix_table_dest = st.selectbox("Table dest. :", options=list(tables_dest_dict.keys()), key="dest_table")
-                                            if st.button("Valider le transfert", type="primary"):
-                                                nouvelle_table_id = tables_dest_dict[choix_table_dest]
-                                                ancienne_table_id = st.session_state.table_active
-                                                cmd_id = st.session_state.commande_id_en_cours
-                                                cursor_t = conn.cursor()
-                                                cursor_t.execute("UPDATE Tables_Resto SET statut = 'Libre', demande_addition = 0 WHERE id = ?", (ancienne_table_id,))
-                                                cursor_t.execute("UPDATE Tables_Resto SET statut = 'Occupée' WHERE id = ?", (nouvelle_table_id,))
-                                                cursor_t.execute("UPDATE Commandes SET table_id = ? WHERE id = ?", (nouvelle_table_id, cmd_id))
-                                                conn.commit()
-                                                st.session_state.table_active = nouvelle_table_id
-                                                st.success(f"Ticket transféré vers {choix_table_dest} !")
-                                                st.rerun()
-                                        else: st.info(f"Aucune table libre dans la zone {choix_salle_dest}.")
-
-                            if table_selectionnee_id:
-                                cursor.execute("SELECT id FROM Commandes WHERE table_id = ? AND statut = 'En attente'", (table_selectionnee_id,))
-                                cmd_existante = cursor.fetchone()
-                                if cmd_existante:
-                                    st.warning(f"⚠️ Ticket en attente (#{cmd_existante[0]}).")
-                                    if st.button("🔄 Charger le ticket"):
-                                        st.session_state.commande_id_en_cours = cmd_existante[0]
-                                        st.session_state.paiements_partiels = []
-                                        st.session_state.pourboire_ticket = 0.0
-                                        cursor.execute("SELECT client_id FROM Commandes WHERE id = ?", (cmd_existante[0],))
-                                        c_id_res = cursor.fetchone()
-                                        if c_id_res and c_id_res[0]:
-                                            c_id = c_id_res[0]
-                                            label_found = "Passager (Anonyme)"
-                                            for lbl, db_id in dict_clients.items():
-                                                if db_id == c_id: label_found = lbl; break
-                                            st.session_state.active_client_name = label_found
-                                        else: st.session_state.active_client_name = "Passager (Anonyme)"
-
-                                        df_lignes = pd.read_sql_query("SELECT lc.produit_id as id, p.nom, p.prix as prix_base, lc.prix_unitaire as prix, lc.quantite as qte, lc.quantite_envoyee, lc.quantite_offert_envoyee, lc.quantite_retour_envoyee, p.applique_tva, c.tva as tva_rate FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id JOIN Categories c ON p.categorie_id = c.id WHERE lc.commande_id = ?", conn, params=(cmd_existante[0],))
-                                        st.session_state.panier = {}
-                                        for _, row in df_lignes.iterrows():
-                                            p_id, qte, prix_ligne, prix_b = int(row["id"]), int(row["qte"]), float(row["prix"]), float(row["prix_base"])
-                                            qte_env = int(row["quantite_envoyee"]) if not pd.isna(row.get("quantite_envoyee")) else 0
-                                            qte_off_env = int(row["quantite_offert_envoyee"]) if not pd.isna(row.get("quantite_offert_envoyee")) else 0
-                                            qte_ret_env = int(row["quantite_retour_envoyee"]) if not pd.isna(row.get("quantite_retour_envoyee")) else 0
-
-                                            if p_id not in st.session_state.panier: st.session_state.panier[p_id] = {"nom": row["nom"], "prix_base": prix_b, "qte": 0, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row["applique_tva"]), "tva_rate": float(row["tva_rate"])}
-                                            if qte > 0:
-                                                if prix_ligne == 0: st.session_state.panier[p_id]["qte_offert"] += qte; st.session_state.panier[p_id]["qte_offert_envoyee"] += qte_off_env
-                                                else: st.session_state.panier[p_id]["qte"] += qte; st.session_state.panier[p_id]["qte_envoyee"] += qte_env
-                                            elif qte < 0: st.session_state.panier[p_id]["qte_retour"] += abs(qte); st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
-                                        st.rerun()
-                                else: st.session_state.commande_id_en_cours = None
-                        else: st.warning(f"Aucune table configurée dans la zone {choix_salle}.")
-                    else: st.warning("Aucune zone (salle) configurée.")
-                
-                if type_cmd in ["À Emporter", "Livraison"]:
+                if type_cmd in ["Caisse", "Livraison"]:
                     cursor.execute("SELECT id, COALESCE(nom_client, 'Inconnu') FROM Commandes WHERE type_commande = ? AND statut = 'En attente'", (type_cmd,))
                     tickets_attente = cursor.fetchall()
                     if tickets_attente:
@@ -1961,9 +1657,12 @@ elif menu == "Prise de Commande":
                                     c_id = c_id_res[0]
                                     label_found = "Passager (Anonyme)"
                                     for lbl, db_id in dict_clients.items():
-                                        if db_id == c_id: label_found = lbl; break
+                                        if db_id == c_id: 
+                                            label_found = lbl
+                                            break
                                     st.session_state.active_client_name = label_found
-                                else: st.session_state.active_client_name = "Passager (Anonyme)"
+                                else: 
+                                    st.session_state.active_client_name = "Passager (Anonyme)"
 
                                 df_lignes = pd.read_sql_query("SELECT lc.produit_id as id, p.nom, p.prix as prix_base, lc.prix_unitaire as prix, lc.quantite as qte, lc.quantite_envoyee, lc.quantite_offert_envoyee, lc.quantite_retour_envoyee, p.applique_tva, c.tva as tva_rate FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id JOIN Categories c ON p.categorie_id = c.id WHERE lc.commande_id = ?", conn, params=(cmd_id_load,))
                                 st.session_state.panier = {}
@@ -1973,20 +1672,38 @@ elif menu == "Prise de Commande":
                                     qte_off_env = int(row["quantite_offert_envoyee"]) if not pd.isna(row.get("quantite_offert_envoyee")) else 0
                                     qte_ret_env = int(row["quantite_retour_envoyee"]) if not pd.isna(row.get("quantite_retour_envoyee")) else 0
 
-                                    if p_id not in st.session_state.panier: st.session_state.panier[p_id] = {"nom": row["nom"], "prix_base": prix_b, "qte": 0, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row["applique_tva"]), "tva_rate": float(row["tva_rate"])}
+                                    if p_id not in st.session_state.panier: 
+                                        st.session_state.panier[p_id] = {"nom": row["nom"], "prix_base": prix_b, "qte": 0, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row["applique_tva"]), "tva_rate": float(row["tva_rate"])}
                                     if qte > 0:
-                                        if prix_ligne == 0: st.session_state.panier[p_id]["qte_offert"] += qte; st.session_state.panier[p_id]["qte_offert_envoyee"] += qte_off_env
-                                        else: st.session_state.panier[p_id]["qte"] += qte; st.session_state.panier[p_id]["qte_envoyee"] += qte_env
-                                    elif qte < 0: st.session_state.panier[p_id]["qte_retour"] += abs(qte); st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
+                                        if prix_ligne == 0: 
+                                            st.session_state.panier[p_id]["qte_offert"] += qte
+                                            st.session_state.panier[p_id]["qte_offert_envoyee"] += qte_off_env
+                                        else: 
+                                            st.session_state.panier[p_id]["qte"] += qte
+                                            st.session_state.panier[p_id]["qte_envoyee"] += qte_env
+                                    elif qte < 0: 
+                                        st.session_state.panier[p_id]["qte_retour"] += abs(qte)
+                                        st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
+                                        
                                 st.rerun()
-                        else: st.session_state.commande_id_en_cours = None
-                    else: st.session_state.commande_id_en_cours = None
-                    st.session_state.table_active = None
+                        else: 
+                            st.session_state.commande_id_en_cours = None
+                    else: 
+                        st.session_state.commande_id_en_cours = None
 
             st.divider()
 
             if len(st.session_state.panier) == 0:
                 st.info("Le ticket est vide.")
+                if st.session_state.commande_id_en_cours is not None:
+                    if st.button("🗑️ Annuler / Supprimer ce ticket en attente", use_container_width=True):
+                        cursor = conn.cursor()
+                        cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (st.session_state.commande_id_en_cours,))
+                        cursor.execute("DELETE FROM Commandes WHERE id = ?", (st.session_state.commande_id_en_cours,))
+                        conn.commit()
+                        st.session_state.commande_id_en_cours = None
+                        st.session_state.active_client_name = "Passager (Anonyme)"
+                        st.rerun()
             else:
                 total_commande = 0
                 cols_ratio = [3, 0.6, 0.6, 1.5, 0.6, 0.6, 2]
@@ -2005,19 +1722,26 @@ elif menu == "Prise de Commande":
                         c_nom.markdown(f"<div style='padding-top: 5px; font-weight: bold; font-size: 0.85em;'>{item['nom']}</div>", unsafe_allow_html=True)
                         
                         if c_off.button("🎁", key=f"off_{p_id}", help="Offrir", use_container_width=True): 
-                            item["qte_offert"] += 1; item["qte"] = max(0, item["qte"] - 1); st.rerun()
+                            item["qte_offert"] += 1
+                            item["qte"] = max(0, item["qte"] - 1)
+                            st.rerun()
                         if c_ret.button("➖", key=f"ret_{p_id}", use_container_width=True): 
-                            item["qte_retour"] += 1; st.rerun()
+                            item["qte_retour"] += 1
+                            st.rerun()
                             
                         key_qte = f"in_qte_{p_id}_{item['qte']}"
                         new_qte = c_qte.number_input("Qté", min_value=0.0, value=float(item['qte']), step=1.0, key=key_qte, label_visibility="collapsed")
-                        if new_qte != item['qte']: item['qte'] = new_qte; st.rerun()
+                        if new_qte != item['qte']:
+                            item['qte'] = new_qte
+                            st.rerun()
                             
                         if c_plus.button("➕", key=f"add_{p_id}", use_container_width=True): 
-                            item["qte"] += 1; st.rerun()
+                            item["qte"] += 1
+                            st.rerun()
                             
                         if c_del.button("🗑️", key=f"del_{p_id}", use_container_width=True): 
-                            item["qte"] = 0; st.rerun()
+                            item["qte"] = 0
+                            st.rerun()
                             
                         c_prix.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>{fmt_prix(sous_total)} F</div>", unsafe_allow_html=True)
 
@@ -2026,16 +1750,21 @@ elif menu == "Prise de Commande":
                         c_nom_o.markdown(f"<div style='padding-top: 5px; color: #ffb703; font-size: 0.85em;'>↳ <i>Offert</i></div>", unsafe_allow_html=True)
                         c_off_o.write("")
                         if c_ret_o.button("➖", key=f"sub_o_{p_id}", use_container_width=True): 
-                            item["qte_offert"] = max(0, item["qte_offert"] - 1); st.rerun()
+                            item["qte_offert"] = max(0, item["qte_offert"] - 1)
+                            st.rerun()
                             
                         key_qteo = f"in_qteo_{p_id}_{item['qte_offert']}"
                         new_qte_o = c_qte_o.number_input("Qté O", min_value=0.0, value=float(item['qte_offert']), step=1.0, key=key_qteo, label_visibility="collapsed")
-                        if new_qte_o != item['qte_offert']: item['qte_offert'] = new_qte_o; st.rerun()
+                        if new_qte_o != item['qte_offert']:
+                            item['qte_offert'] = new_qte_o
+                            st.rerun()
                             
                         if c_plus_o.button("➕", key=f"add_o_{p_id}", use_container_width=True): 
-                            item["qte_offert"] += 1; st.rerun()
+                            item["qte_offert"] += 1
+                            st.rerun()
                         if c_del_o.button("🗑️", key=f"del_o_{p_id}", use_container_width=True): 
-                            item["qte_offert"] = 0; st.rerun()
+                            item["qte_offert"] = 0
+                            st.rerun()
                         c_prix_o.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>0 F</div>", unsafe_allow_html=True)
 
                     if item.get("qte_retour", 0) > 0:
@@ -2045,16 +1774,21 @@ elif menu == "Prise de Commande":
                         c_nom_r.markdown(f"<div style='padding-top: 5px; color: #ff4b4b; font-size: 0.85em;'>↳ <i>Annul.</i></div>", unsafe_allow_html=True)
                         c_off_r.write("")
                         if c_ret_r.button("➖", key=f"add_r_{p_id}", use_container_width=True): 
-                            item["qte_retour"] += 1; st.rerun()
+                            item["qte_retour"] += 1
+                            st.rerun()
                             
                         key_qter = f"in_qter_{p_id}_{item['qte_retour']}"
                         new_qte_r = c_qte_r.number_input("Qté R", min_value=0.0, value=float(item['qte_retour']), step=1.0, key=key_qter, label_visibility="collapsed")
-                        if new_qte_r != item['qte_retour']: item['qte_retour'] = new_qte_r; st.rerun()
+                        if new_qte_r != item['qte_retour']:
+                            item['qte_retour'] = new_qte_r
+                            st.rerun()
                             
                         if c_plus_r.button("➕", key=f"sub_r_{p_id}", use_container_width=True): 
-                            item["qte_retour"] = max(0, item["qte_retour"] - 1); st.rerun()
+                            item["qte_retour"] = max(0, item["qte_retour"] - 1)
+                            st.rerun()
                         if c_del_r.button("🗑️", key=f"del_r_{p_id}", use_container_width=True): 
-                            item["qte_retour"] = 0; st.rerun()
+                            item["qte_retour"] = 0
+                            st.rerun()
                         c_prix_r.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>{fmt_prix(sous_total_ret)} F</div>", unsafe_allow_html=True)
 
                 total_produits = total_commande
@@ -2066,134 +1800,91 @@ elif menu == "Prise de Commande":
                     c_prix_l.markdown(f"<div style='text-align: right; padding-top: 5px; font-weight: bold; color: #0288d1;'>{fmt_prix(frais_livraison_actuel)} F</div>", unsafe_allow_html=True)
                     total_commande += frais_livraison_actuel
 
-                if role_actif == "Serveur" and type_cmd == "Sur Place" and table_selectionnee_id and st.session_state.commande_id_en_cours:
-                    st.markdown(f"### TOTAL TICKET : {fmt_prix(total_commande)} FCFA")
-                    if st.button("🛎️ Demander l'addition à la caisse", type="primary", use_container_width=True):
-                        cursor.execute("UPDATE Tables_Resto SET demande_addition = 1 WHERE id = ?", (table_selectionnee_id,))
-                        conn.commit()
-                        st.success("Demande envoyée !")
-
-                if role_actif != "Serveur":
-                    df_paiement = pd.read_sql_query("SELECT nom FROM Methodes_Paiement ORDER BY nom", conn)
-                    options_paiement = df_paiement["nom"].tolist()
-                    total_a_payer = total_commande
-                    pourboire_calcule = 0.0
-                    reste = total_a_payer
-                    
-                    for p in st.session_state.paiements_partiels:
-                        if p["methode"] != "Espèces":
-                            if p["montant"] > reste:
-                                pourboire_calcule += (p["montant"] - reste)
-                                reste = 0.0
-                            else:
-                                reste -= p["montant"]
-                        else:
-                            reste -= p["montant"]
-                            
-                    if reste < 0:
-                        rendu_monnaie = abs(reste)
-                        reste_a_payer = 0.0
-                    else:
-                        reste_a_payer = reste
-                        rendu_monnaie = 0.0
+                df_paiement = pd.read_sql_query("SELECT nom FROM Methodes_Paiement ORDER BY nom", conn)
+                options_paiement = df_paiement["nom"].tolist()
+                total_a_payer = total_commande
+                pourboire_calcule = 0.0
+                reste = total_a_payer
                 
-                    st.session_state.pourboire_ticket = pourboire_calcule
-                    total_paye = sum(p["montant"] for p in st.session_state.paiements_partiels)
-                    
-                    st.markdown(f"<div style='text-align: left; margin-top: 10px; font-size: 1.2em; color: #0288d1;'><b>À RÉGLER : {fmt_prix(total_a_payer)} FCFA</b></div>", unsafe_allow_html=True)
-                    
-                    with st.container():
-                        c_p1, c_p2 = st.columns(2)
-                        # On met index=None pour forcer le choix
-                        methode_saisie = c_p1.selectbox("Mode de paiement", options=options_paiement, index=None, placeholder="Choisir un mode...")
-                        montant_saisi = c_p2.number_input("Montant", min_value=0.0, value=float(reste_a_payer), step=1000.0)
+                for p in st.session_state.paiements_partiels:
+                    if p["methode"] != "Espèces":
+                        if p["montant"] > reste:
+                            pourboire_calcule += (p["montant"] - reste)
+                            reste = 0.0
+                        else: 
+                            reste -= p["montant"]
+                    else: 
+                        reste -= p["montant"]
                         
-                        chambre_pour_paiement = None
-                        if methode_saisie == "Note de Chambre" and type_cmd != "Room Service":
-                            df_chambres_paiement = pd.read_sql_query("SELECT id, numero_chambre FROM Chambres_Hotel ORDER BY numero_chambre", conn)
-                            if not df_chambres_paiement.empty:
-                                dict_chm_p = dict(zip(df_chambres_paiement["numero_chambre"], df_chambres_paiement["id"]))
-                                choix_chm_p = st.selectbox("Imputer sur quelle chambre ?", options=list(dict_chm_p.keys()))
-                                chambre_pour_paiement = int(dict_chm_p[choix_chm_p])
-                            else:
-                                st.warning("Aucune chambre n'est configurée dans le système.")
-                        
-                        if st.button("➕ Ajouter paiement", use_container_width=True):
-                            # Vérification de sécurité avant d'ajouter le paiement
-                            if not methode_saisie:
-                                st.error("⚠️ Vous devez sélectionner un mode de paiement !")
-                            elif montant_saisi > 0:
-                                st.session_state.paiements_partiels.append({
-                                    "methode": methode_saisie, 
-                                    "montant": montant_saisi,
-                                    "chm_id": chambre_pour_paiement
-                                })
-                                st.rerun()
-                                
-                    if st.session_state.paiements_partiels:
-                        st.markdown("<hr style='margin: 5px 0px;'>", unsafe_allow_html=True)
-                        for i, p in enumerate(st.session_state.paiements_partiels):
-                            cp1, cp2, cp3 = st.columns([3, 2, 1])
-                            lbl_m = p['methode']
-                            if p.get('chm_id'):
-                                cursor.execute("SELECT numero_chambre FROM Chambres_Hotel WHERE id=?", (p['chm_id'],))
-                                rc = cursor.fetchone()
-                                if rc: lbl_m += f" (Ch. {rc[0]})"
-                            cp1.write(f"✔️ {lbl_m}")
-                            cp2.write(f"{fmt_prix(p['montant'])} F")
-                            if cp3.button("❌", key=f"del_p_{i}"):
-                                st.session_state.paiements_partiels.pop(i)
-                                st.rerun()
+                if reste < 0: 
+                    rendu_monnaie = abs(reste)
+                    reste_a_payer = 0.0
+                else: 
+                    reste_a_payer = reste
+                    rendu_monnaie = 0.0
+            
+                st.session_state.pourboire_ticket = pourboire_calcule
+                total_paye = sum(p["montant"] for p in st.session_state.paiements_partiels)
+                
+                st.markdown(f"<div style='text-align: left; margin-top: 10px; font-size: 1.2em; color: #0288d1;'><b>À RÉGLER : {fmt_prix(total_a_payer)} FCFA</b></div>", unsafe_allow_html=True)
+                
+                with st.container():
+                    c_p1, c_p2 = st.columns(2)
+                    idx_especes = options_paiement.index("Espèces") if "Espèces" in options_paiement else 0
+                    methode_saisie = c_p1.selectbox("Mode de paiement", options=options_paiement, index=idx_especes)
+                    montant_saisi = c_p2.number_input("Montant", min_value=0.0, value=float(reste_a_payer), step=1000.0)
                     
-                    if rendu_monnaie > 0:
-                        st.success(f"🔄 **MONNAIE : {fmt_prix(rendu_monnaie)} FCFA**")
-                    elif reste_a_payer > 0:
-                        st.warning(f"⚠️ **Reste à payer : {fmt_prix(reste_a_payer)} F**")
-                    elif reste_a_payer == 0 and total_paye > 0:
-                        if pourboire_calcule > 0: st.info(f"✅ Compte bon ! (🎁 Pboire : {fmt_prix(pourboire_calcule)} F)")
-                        else: st.info("✅ Le compte est bon !")
+                    if st.button("➕ Ajouter paiement", use_container_width=True):
+                        if montant_saisi > 0:
+                            st.session_state.paiements_partiels.append({
+                                "methode": methode_saisie, 
+                                "montant": montant_saisi
+                            })
+                            st.rerun()
+                            
+                if st.session_state.paiements_partiels:
+                    st.markdown("<hr style='margin: 5px 0px;'>", unsafe_allow_html=True)
+                    for i, p in enumerate(st.session_state.paiements_partiels):
+                        cp1, cp2, cp3 = st.columns([3, 2, 1])
+                        lbl_m = p['methode']
+                        cp1.write(f"✔️ {lbl_m}")
+                        cp2.write(f"{fmt_prix(p['montant'])} F")
+                        if cp3.button("❌", key=f"del_p_{i}"): 
+                            st.session_state.paiements_partiels.pop(i)
+                            st.rerun()
+                
+                if rendu_monnaie > 0: 
+                    st.success(f"🔄 **MONNAIE : {fmt_prix(rendu_monnaie)} FCFA**")
+                elif reste_a_payer > 0: 
+                    st.warning(f"⚠️ **Reste à payer : {fmt_prix(reste_a_payer)} F**")
+                elif reste_a_payer == 0 and total_paye > 0:
+                    if pourboire_calcule > 0: 
+                        st.info(f"✅ Compte bon ! (🎁 Pboire : {fmt_prix(pourboire_calcule)} F)")
+                    else: 
+                        st.info("✅ Le compte est bon !")
 
-                    st.divider()
-                    
-                    c_pr1, c_pr2 = st.columns(2)
-                    auto_print = c_pr1.checkbox("🖨️ Reçu client", value=True)
-                    auto_print_bons = c_pr2.checkbox("👨‍🍳 Bons cuisine", value=False)
-                else:
-                    auto_print = False
-                    auto_print_bons = False
+                st.divider()
+                
+                c_pr1, c_pr2 = st.columns(2)
+                auto_print = c_pr1.checkbox("🖨️ Reçu client", value=True)
+                auto_print_bons = c_pr2.checkbox("👨‍🍳 Bons de préparation", value=False)
 
                 st.divider()
 
                 col_btn_vid, col_btn_att = st.columns(2)
-                # Le bouton change de nom si c'est un vrai ticket ou juste un brouillon
-                libelle_btn = "❌ Annuler le Ticket" if st.session_state.commande_id_en_cours else "🗑️ Vider"
-                
-                if col_btn_vid.button(libelle_btn, use_container_width=True):
-                    if st.session_state.commande_id_en_cours:
-                        if role_actif != "Manager":
-                            st.error("⚠️ Seul un Manager peut annuler un ticket déjà en cours.")
-                        else:
-                            cursor = conn.cursor()
-                            # On passe le ticket à 0 et on change son statut pour garder la trace
-                            cursor.execute("UPDATE Commandes SET statut = 'Annulé', total = 0, pourboire = 0 WHERE id = ?", (st.session_state.commande_id_en_cours,))
+                if col_btn_vid.button("🗑️ Vider / Annuler", use_container_width=True):
+                    if st.session_state.commande_id_en_cours is not None:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT statut FROM Commandes WHERE id = ?", (st.session_state.commande_id_en_cours,))
+                        res_stat = cursor.fetchone()
+                        if res_stat and res_stat[0] == 'En attente':
                             cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (st.session_state.commande_id_en_cours,))
-                            
-                            if st.session_state.table_active:
-                                cursor.execute("UPDATE Tables_Resto SET statut = 'Libre', demande_addition = 0 WHERE id = ?", (st.session_state.table_active,))
+                            cursor.execute("DELETE FROM Commandes WHERE id = ?", (st.session_state.commande_id_en_cours,))
                             conn.commit()
-                            
-                            st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
-                            st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
-                            st.session_state.table_active, st.session_state.chambre_active = None, None
-                            st.session_state.active_client_name = "Passager (Anonyme)"
-                            st.success("Ticket annulé et conservé dans l'historique !")
-                            st.rerun()
-                    else:
-                        st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
-                        st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
-                        st.session_state.table_active, st.session_state.chambre_active = None, None
-                        st.session_state.active_client_name = "Passager (Anonyme)"
-                        st.rerun()
+                    st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
+                    st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
+                    st.session_state.active_client_name = "Passager (Anonyme)"
+                    st.rerun()
 
                 if col_btn_att.button("⏸️ Attente", use_container_width=True):
                     if choix_client == "+ Nouveau Client..." and client_tel:
@@ -2205,21 +1896,11 @@ elif menu == "Prise de Commande":
                         else: client_id_db = exists[0]
 
                     if st.session_state.commande_id_en_cours is None:
-                        if type_cmd == "Sur Place" and table_selectionnee_id:
-                            cursor.execute("SELECT id FROM Commandes WHERE table_id = ? AND statut = 'En attente'", (table_selectionnee_id,))
-                            dup = cursor.fetchone()
-                            if dup: st.session_state.commande_id_en_cours = dup[0]
-                        elif type_cmd == "Room Service" and chambre_selectionnee_id:
-                            cursor.execute("SELECT id FROM Commandes WHERE chambre_id = ? AND statut = 'En attente'", (chambre_selectionnee_id,))
-                            dup = cursor.fetchone()
-                            if dup: st.session_state.commande_id_en_cours = dup[0]
-
-                    if st.session_state.commande_id_en_cours is None:
-                        cursor.execute("INSERT INTO Commandes (type_commande, table_id, chambre_id, statut, total, pourboire, nom_client, telephone, adresse, client_id, utilisateur_id, zone_id, frais_livraison) VALUES (?, ?, ?, 'En attente', ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, table_selectionnee_id, chambre_selectionnee_id, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
+                        cursor.execute("INSERT INTO Commandes (type_commande, statut, total, pourboire, nom_client, telephone, adresse, client_id, utilisateur_id, zone_id, frais_livraison) VALUES (?, 'En attente', ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
                         cmd_id = cursor.lastrowid
                     else:
                         cmd_id = st.session_state.commande_id_en_cours
-                        cursor.execute("UPDATE Commandes SET total = ?, pourboire = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ?, table_id = ?, chambre_id = ? WHERE id = ?", (total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, table_selectionnee_id, chambre_selectionnee_id, cmd_id))
+                        cursor.execute("UPDATE Commandes SET total = ?, pourboire = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ? WHERE id = ?", (total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, cmd_id))
                         cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (cmd_id,))
 
                     for p_id, item in st.session_state.panier.items():
@@ -2227,275 +1908,219 @@ elif menu == "Prise de Commande":
                         if item.get("qte_offert", 0) > 0: cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, 0.0, 0.0, 0, ?, 0)", (cmd_id, p_id, item["qte_offert"], item.get("qte_offert_envoyee", 0)))
                         if item.get("qte_retour", 0) > 0: cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, 0, 0, ?)", (cmd_id, p_id, -item["qte_retour"], item["prix_base"], -item["prix_base"] * item["qte_retour"], item.get("qte_retour_envoyee", 0)))
 
-                    if type_cmd == "Sur Place" and table_selectionnee_id: cursor.execute("UPDATE Tables_Resto SET statut = 'Occupée' WHERE id = ?", (table_selectionnee_id,))
                     conn.commit()
                     st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
                     st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
-                    st.session_state.table_active, st.session_state.chambre_active = None, None
                     st.session_state.active_client_name = "Passager (Anonyme)"
                     st.success("Ticket mis en attente !")
                     st.rerun()
 
-                if role_actif != "Serveur" and reste_a_payer == 0 and total_a_payer > 0:
+                if reste_a_payer == 0 and total_a_payer > 0:
                     if st.button("✅ Valider l'Encaissement", type="primary", use_container_width=True):
                         cursor = conn.cursor()
                         
-                        has_note_chambre = any(p["methode"] == "Note de Chambre" for p in st.session_state.paiements_partiels)
                         has_a_credit = any(p["methode"] == "À Crédit" for p in st.session_state.paiements_partiels)
-                        is_credit = has_note_chambre or has_a_credit
+                        is_credit = has_a_credit
                         
-                        for p in st.session_state.paiements_partiels:
-                            if p.get("chm_id"): chambre_selectionnee_id = p["chm_id"]
-                        
-                        if has_note_chambre and not chambre_selectionnee_id:
-                            st.error("⚠️ Vous devez absolument imputer une Chambre pour un paiement 'Note de Chambre'.")
+                        if choix_client == "+ Nouveau Client..." and client_tel:
+                            cursor.execute("SELECT id FROM Clients WHERE telephone = ?", (client_tel,))
+                            exists = cursor.fetchone()
+                            if not exists:
+                                cursor.execute("INSERT INTO Clients (nom, telephone, adresse, zone_id) VALUES (?, ?, ?, ?)", (client_nom, client_tel, client_adr, zone_id_selected))
+                                client_id_db = cursor.lastrowid
+                            else: client_id_db = exists[0]
+
+                        statut_cmd = "À Crédit" if is_credit else "Payée"
+                        date_paie_sql = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        methode_principale = "Multiple" if len(st.session_state.paiements_partiels) > 1 else st.session_state.paiements_partiels[0]["methode"]                            
+
+                        if st.session_state.commande_id_en_cours is None:
+                            cursor.execute("INSERT INTO Commandes (type_commande, statut, total, pourboire, nom_client, telephone, adresse, client_id, methode_paiement, date_paiement, utilisateur_id, zone_id, frais_livraison) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, statut_cmd, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, methode_principale, date_paie_sql, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
+                            cmd_id = cursor.lastrowid
                         else:
-                            if choix_client == "+ Nouveau Client..." and client_tel:
-                                cursor.execute("SELECT id FROM Clients WHERE telephone = ?", (client_tel,))
-                                exists = cursor.fetchone()
-                                if not exists:
-                                    cursor.execute("INSERT INTO Clients (nom, telephone, adresse, zone_id) VALUES (?, ?, ?, ?)", (client_nom, client_tel, client_adr, zone_id_selected))
-                                    client_id_db = cursor.lastrowid
-                                else: client_id_db = exists[0]
-    
-                            statut_cmd = "À Crédit" if is_credit else "Payée"
-                            date_paie_sql = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            methode_principale = "Multiple" if len(st.session_state.paiements_partiels) > 1 else st.session_state.paiements_partiels[0]["methode"]
-    
-                            if st.session_state.commande_id_en_cours is None:
-                                if type_cmd == "Sur Place" and table_selectionnee_id:
-                                    cursor.execute("SELECT id FROM Commandes WHERE table_id = ? AND statut = 'En attente'", (table_selectionnee_id,))
-                                    dup = cursor.fetchone()
-                                    if dup: st.session_state.commande_id_en_cours = dup[0]
-                                elif type_cmd == "Room Service" and chambre_selectionnee_id:
-                                    cursor.execute("SELECT id FROM Commandes WHERE chambre_id = ? AND statut = 'En attente'", (chambre_selectionnee_id,))
-                                    dup = cursor.fetchone()
-                                    if dup: st.session_state.commande_id_en_cours = dup[0]
-    
-                            if st.session_state.commande_id_en_cours is None:
-                                cursor.execute("INSERT INTO Commandes (type_commande, table_id, chambre_id, statut, total, pourboire, nom_client, telephone, adresse, client_id, methode_paiement, date_paiement, utilisateur_id, zone_id, frais_livraison) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, table_selectionnee_id, chambre_selectionnee_id, statut_cmd, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, methode_principale, date_paie_sql, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
-                                cmd_id = cursor.lastrowid
-                            else:
-                                cmd_id = st.session_state.commande_id_en_cours
-                                cursor.execute("UPDATE Commandes SET statut = ?, total = ?, pourboire = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, methode_paiement = ?, date_paiement = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ?, table_id = ?, chambre_id = ? WHERE id = ?", (statut_cmd, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, methode_principale, date_paie_sql, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, table_selectionnee_id, chambre_selectionnee_id, cmd_id))
-                                cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (cmd_id,))
-                                cursor.execute("DELETE FROM Paiements_Ticket WHERE commande_id = ?", (cmd_id,))
-                            
-                            rendu_restant = rendu_monnaie
-                            montants_finaux = [dict(pt) for pt in st.session_state.paiements_partiels]
-                            if rendu_restant > 0:
-                                for pt in montants_finaux:
-                                    if pt["methode"] == "Espèces" and pt["montant"] >= rendu_restant:
-                                        pt["montant"] -= rendu_restant; rendu_restant = 0; break
-                            
-                            for p_f in montants_finaux: cursor.execute("INSERT INTO Paiements_Ticket (commande_id, methode, montant, date_paiement) VALUES (?, ?, ?, ?)", (cmd_id, p_f["methode"], p_f["montant"], date_paie_sql))
-    
-                            params = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
-                            p_nom_r = params["nom"] if params["nom"] else "VOTRE RESTAURANT"
-    
-                            ticket_str = f"=== {p_nom_r.upper()} ==="[:42].center(42) + "\n"
-                            if params["adresse"]:
-                                for ligne_adr_r in textwrap.wrap(params["adresse"], width=42): ticket_str += f"{ligne_adr_r.center(42)}\n"
-                            if params["telephone"]: ticket_str += f"Tel: {params['telephone']}".center(42) + "\n"
-                            if params["ninea"]: ticket_str += f"NINEA: {params['ninea']}".center(42) + "\n"
-                            ticket_str += "-" * 42 + "\n"
-                            ticket_str += f"TICKET #{cmd_id} - {datetime.datetime.now().strftime(sys_format_date)}\n"
-                            ticket_str += f"Caissier: {st.session_state.utilisateur['nom']}\n"
-                            ticket_str += f"Type: {type_cmd} | Reglement: {methode_principale}\n"
-                            if type_cmd == "Sur Place" and table_selectionnee_id:
-                                cursor.execute("SELECT numero_table FROM Tables_Resto WHERE id = ?", (table_selectionnee_id,))
-                                res_table = cursor.fetchone()
-                                if res_table: ticket_str += f"Table: {res_table[0]}\n"
-                            
-                            if chambre_selectionnee_id:
-                                cursor.execute("SELECT numero_chambre FROM Chambres_Hotel WHERE id = ?", (chambre_selectionnee_id,))
-                                res_chm = cursor.fetchone()
-                                if res_chm: ticket_str += f"Chambre: {res_chm[0]}\n"
+                            cmd_id = st.session_state.commande_id_en_cours
+                            cursor.execute("UPDATE Commandes SET statut = ?, total = ?, pourboire = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, methode_paiement = ?, date_paiement = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ? WHERE id = ?", (statut_cmd, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, methode_principale, date_paie_sql, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, cmd_id))
+                            cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (cmd_id,))
+                            cursor.execute("DELETE FROM Paiements_Ticket WHERE commande_id = ?", (cmd_id,))
+                        
+                        rendu_restant = rendu_monnaie
+                        montants_finaux = [dict(pt) for pt in st.session_state.paiements_partiels]
+                        if rendu_restant > 0:
+                            for pt in montants_finaux:
+                                if pt["methode"] == "Espèces" and pt["montant"] >= rendu_restant:
+                                    pt["montant"] -= rendu_restant; rendu_restant = 0; break
+                        
+                        for p_f in montants_finaux: cursor.execute("INSERT INTO Paiements_Ticket (commande_id, methode, montant, date_paiement) VALUES (?, ?, ?, ?)", (cmd_id, p_f["methode"], p_f["montant"], date_paie_sql))
+
+                        params = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
+                        p_nom_r = params["nom"] if params["nom"] else "VOTRE COMMERCE"
+
+                        ticket_str = f"=== {p_nom_r.upper()} ==="[:42].center(42) + "\n"
+                        if params["adresse"]:
+                            for ligne_adr_r in textwrap.wrap(params["adresse"], width=42): ticket_str += f"{ligne_adr_r.center(42)}\n"
+                        if params["telephone"]: ticket_str += f"Tel: {params['telephone']}".center(42) + "\n"
+                        if params["ninea"]: ticket_str += f"NINEA: {params['ninea']}".center(42) + "\n"
+                        ticket_str += "-" * 42 + "\n"
+                        ticket_str += f"TICKET #{cmd_id} - {datetime.datetime.now().strftime(sys_format_date)}\n"
+                        ticket_str += f"Caissier: {st.session_state.utilisateur['nom']}\n"
+                        ticket_str += f"Type: {type_cmd} | Reglement: {methode_principale}\n"
+                        if client_id_db: ticket_str += f"Code Client: CLI-{client_id_db:04d}\n"
+                        if client_nom: ticket_str += f"Client: {client_nom}\n"
+                        if client_tel: ticket_str += f"Tel: {client_tel}\n"
+                        if type_cmd == "Livraison":
+                            if zone_id_selected:
+                                cursor.execute("SELECT nom FROM Zones_Livraison WHERE id = ?", (zone_id_selected,))
+                                rz = cursor.fetchone()
+                                if rz: ticket_str += f"Zone: {rz[0]}\n"
+                            if client_adr:
+                                for ligne_adr in textwrap.wrap(f"Adresse: {client_adr}", width=42): ticket_str += f"{ligne_adr}\n"
+                        ticket_str += "-" * 42 + "\n"
+
+                        tva_totale = 0.0
+                        for p_id, item in st.session_state.panier.items():
+                            qte_nette = item["qte"] + item.get("qte_offert", 0) - item.get("qte_retour", 0)
+                            if item["qte"] > 0:
+                                stot = item["prix_base"] * item["qte"]
+                                if item.get("applique_tva", 1) == 1 and item.get("tva_rate", 0.0) > 0:
+                                    tva_totale += stot - (stot / (1 + item["tva_rate"] / 100))
+                                
+                                cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (cmd_id, p_id, item["qte"], item["prix_base"], stot, item.get("qte_envoyee", 0), item.get("qte_offert_envoyee", 0), 0))
+                                ticket_str += f"{fmt_qte(item['qte'])}x {item['nom']}\n"
+                                ticket_str += f"{fmt_prix(item['prix_base'])} F".rjust(20) + f"{fmt_prix(stot)} F".rjust(22) + "\n"
+                            if item.get("qte_offert", 0) > 0:
+                                cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, 0.0, 0.0, 0, ?, 0)", (cmd_id, p_id, item["qte_offert"], item.get("qte_offert_envoyee", 0)))
+                                ticket_str += f"{fmt_qte(item['qte_offert'])}x {item['nom']} (Offert)\n"
+                                ticket_str += f"0 F".rjust(20) + f"0 F".rjust(22) + "\n"
+                            if item.get("qte_retour", 0) > 0:
+                                stot_r = -item["prix_base"] * item["qte_retour"]
+                                cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, 0, 0, ?)", (cmd_id, p_id, -item["qte_retour"], item["prix_base"], stot_r, item.get("qte_retour_envoyee", 0)))
+                                ticket_str += f"-{fmt_qte(item['qte_retour'])}x {item['nom']} (Annulation)\n"
+                                ticket_str += f"{fmt_prix(item['prix_base'])} F".rjust(20) + f"{fmt_prix(stot_r)} F".rjust(22) + "\n"
+
+                            if qte_nette != 0:
+                                cursor.execute("SELECT depot_id FROM Produits WHERE id = ?", (p_id,))
+                                p_depot = cursor.fetchone()
+                                depot_plat_id = p_depot[0] if (p_depot and p_depot[0]) else None
+                                if not depot_plat_id:
+                                    cursor.execute("SELECT id FROM Depots ORDER BY nom LIMIT 1")
+                                    secours = cursor.fetchone()
+                                    if secours: depot_plat_id = secours[0]
+                                if depot_plat_id:
+                                    cursor.execute("SELECT composition_id, composition_qte FROM Produits WHERE id = ?", (p_id,))
+                                    comp_res = cursor.fetchone()
+                                    base_id = p_id
+                                    qte_stock_deduct = qte_nette
+                                    if comp_res and comp_res[0]:
+                                        base_id = comp_res[0]
+                                        qte_stock_deduct = qte_nette * float(comp_res[1])
+
+                                    cursor.execute("SELECT quantite FROM Stock_Plats WHERE produit_id = ? AND depot_id = ?", (base_id, depot_plat_id))
+                                    res_stock = cursor.fetchone()
+                                    if res_stock: cursor.execute("UPDATE Stock_Plats SET quantite = quantite - ? WHERE produit_id = ? AND depot_id = ?", (qte_stock_deduct, base_id, depot_plat_id))
+                                    else: cursor.execute("INSERT INTO Stock_Plats (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (base_id, depot_plat_id, -qte_stock_deduct))
                                     
-                            if client_id_db: ticket_str += f"Code Client: CLI-{client_id_db:04d}\n"
-                            if client_nom: ticket_str += f"Client: {client_nom}\n"
-                            if client_tel: ticket_str += f"Tel: {client_tel}\n"
-                            if type_cmd == "Livraison":
-                                if zone_id_selected:
-                                    cursor.execute("SELECT nom FROM Zones_Livraison WHERE id = ?", (zone_id_selected,))
-                                    rz = cursor.fetchone()
-                                    if rz: ticket_str += f"Zone: {rz[0]}\n"
-                                if client_adr:
-                                    for ligne_adr in textwrap.wrap(f"Adresse: {client_adr}", width=42): ticket_str += f"{ligne_adr}\n"
-                            ticket_str += "-" * 42 + "\n"
-    
-                            tva_totale = 0.0
+                                    cursor.execute("INSERT INTO Mouvements_Stock (produit_id, depot_id, type_mouvement, quantite, reference) VALUES (?, ?, 'Sortie (Vente)', ?, ?)", (p_id, depot_plat_id, qte_nette, f"Vente - Ticket #{cmd_id}"))
+
+                        ticket_str += "-" * 42 + "\n"
+                        
+                        if type_cmd == "Livraison" and frais_livraison_actuel > 0:
+                            tot_prods = total_commande - frais_livraison_actuel
+                            ticket_str += f"TOTAL : {fmt_prix(tot_prods)} FCFA".rjust(42) + "\n"
+                            if tva_totale > 0: ticket_str += f"Dont TVA : {fmt_prix(tva_totale)} FCFA".rjust(42) + "\n"
+                            ticket_str += f"FRAIS DE LIVRAISON : {fmt_prix(frais_livraison_actuel)} FCFA".rjust(42) + "\n"
+                            ticket_str += f"TOTAL : {fmt_prix(total_commande)} FCFA".rjust(42) + "\n"
+                        else:
+                            ticket_str += f"TOTAL : {fmt_prix(total_commande)} FCFA".rjust(42) + "\n"
+                            if tva_totale > 0: ticket_str += f"Dont TVA : {fmt_prix(tva_totale)} FCFA".rjust(42) + "\n"
+                                
+                        ticket_str += "-" * 42 + "\n"
+                        
+                        for pf in st.session_state.paiements_partiels:
+                            if not (pf['methode'] in ["À Crédit"]): ticket_str += f"Reçu en {pf['methode']} : {fmt_prix(pf['montant'])} FCFA".rjust(42) + "\n"
+                        
+                        if rendu_monnaie > 0: ticket_str += f"MONNAIE RENDUE : {fmt_prix(rendu_monnaie)} FCFA".rjust(42) + "\n"
+
+                        ticket_str += "\n"
+                        ticket_str += f"{'=== MERCI DE VOTRE VISITE ===':^42}\n"
+                        
+                        if is_credit: ticket_str += "\n" + f"{'(Signature)':>42}\n\n"
+                        else: ticket_str += "\n\n\n"
+
+                        conn.commit()
+
+                        if auto_print:
+                            file_date_str_ticket = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+                            nom_exp = f"Ticket_Client_{cmd_id}_{file_date_str_ticket}.txt"
+                            if hasattr(os, 'startfile'): imprimer_ticket_windows(ticket_str, nom_fichier_export=nom_exp, sous_dossier="tickets")
+                            else: sauvegarder_ticket_local(ticket_str, nom_fichier_export=nom_exp, sous_dossier="tickets")
+
+                        if auto_print_bons:
+                            bons_par_depot = {}
                             for p_id, item in st.session_state.panier.items():
-                                qte_nette = item["qte"] + item.get("qte_offert", 0) - item.get("qte_retour", 0)
-                                if item["qte"] > 0:
-                                    stot = item["prix_base"] * item["qte"]
-                                    if item.get("applique_tva", 1) == 1 and item.get("tva_rate", 0.0) > 0:
-                                        tva_totale += stot - (stot / (1 + item["tva_rate"] / 100))
-                                        
-                                    cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (cmd_id, p_id, item["qte"], item["prix_base"], stot, item.get("qte_envoyee", 0), item.get("qte_offert_envoyee", 0), 0))
-                                    ticket_str += f"{fmt_qte(item['qte'])}x {item['nom']}\n"
-                                    ticket_str += f"{fmt_prix(item['prix_base'])} F".rjust(20) + f"{fmt_prix(stot)} F".rjust(22) + "\n"
-                                if item.get("qte_offert", 0) > 0:
-                                    cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, 0.0, 0.0, 0, ?, 0)", (cmd_id, p_id, item["qte_offert"], item.get("qte_offert_envoyee", 0)))
-                                    ticket_str += f"{fmt_qte(item['qte_offert'])}x {item['nom']} (Offert)\n"
-                                    ticket_str += f"0 F".rjust(20) + f"0 F".rjust(22) + "\n"
-                                if item.get("qte_retour", 0) > 0:
-                                    stot_r = -item["prix_base"] * item["qte_retour"]
-                                    cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, 0, 0, ?)", (cmd_id, p_id, -item["qte_retour"], item["prix_base"], stot_r, item.get("qte_retour_envoyee", 0)))
-                                    ticket_str += f"-{fmt_qte(item['qte_retour'])}x {item['nom']} (Annulation)\n"
-                                    ticket_str += f"{fmt_prix(item['prix_base'])} F".rjust(20) + f"{fmt_prix(stot_r)} F".rjust(22) + "\n"
-    
-                                if qte_nette != 0:
-                                    cursor.execute("SELECT depot_id FROM Produits WHERE id = ?", (p_id,))
-                                    p_depot = cursor.fetchone()
-                                    depot_plat_id = p_depot[0] if (p_depot and p_depot[0]) else None
-                                    if not depot_plat_id:
-                                        cursor.execute("SELECT id FROM Depots ORDER BY nom LIMIT 1")
-                                        secours = cursor.fetchone()
-                                        if secours: depot_plat_id = secours[0]
-                                    if depot_plat_id:
-                                        cursor.execute("SELECT composition_id, composition_qte FROM Produits WHERE id = ?", (p_id,))
-                                        comp_res = cursor.fetchone()
-                                        base_id = p_id
-                                        qte_stock_deduct = qte_nette
-                                        if comp_res and comp_res[0]:
-                                            base_id = comp_res[0]
-                                            qte_stock_deduct = qte_nette * float(comp_res[1])
+                                qte_nouvelle = item["qte"] - item.get("qte_envoyee", 0)
+                                qte_off_nouvelle = item.get("qte_offert", 0) - item.get("qte_offert_envoyee", 0)
+                                qte_ret_nouvelle = item.get("qte_retour", 0) - item.get("qte_retour_envoyee", 0)
+                                qte_totale_print = qte_nouvelle + qte_off_nouvelle
+                                if qte_totale_print > 0 or qte_ret_nouvelle > 0:
+                                    cursor.execute("SELECT d.nom FROM Produits p LEFT JOIN Depots d ON p.depot_id = d.id WHERE p.id = ?", (p_id,))
+                                    d_res = cursor.fetchone()
+                                    depot_name = d_res[0] if (d_res and d_res[0]) else "GENERAL"
+                                    if depot_name not in bons_par_depot: bons_par_depot[depot_name] = []
+                                    bons_par_depot[depot_name].append({"nom": item["nom"], "qte_a_imprimer": qte_totale_print, "qte_retour": qte_ret_nouvelle})
 
-                                        cursor.execute("SELECT quantite FROM Stock_Articles WHERE produit_id = ? AND depot_id = ?", (base_id, depot_plat_id))
-                                        res_stock = cursor.fetchone()
-                                        if res_stock: cursor.execute("UPDATE Stock_Articles SET quantite = quantite - ? WHERE produit_id = ? AND depot_id = ?", (qte_stock_deduct, base_id, depot_plat_id))
-                                        else: cursor.execute("INSERT INTO Stock_Articles (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (base_id, depot_plat_id, -qte_stock_deduct))
-                                        
-                                        cursor.execute("INSERT INTO Mouvements_Stock (produit_id, depot_id, type_mouvement, quantite, reference) VALUES (?, ?, 'Sortie (Vente)', ?, ?)", (p_id, depot_plat_id, qte_nette, f"Vente - Ticket #{cmd_id}"))
-    
-                            ticket_str += "-" * 42 + "\n"
-                            
-                            if type_cmd == "Livraison" and frais_livraison_actuel > 0:
-                                tot_prods = total_commande - frais_livraison_actuel
-                                ticket_str += f"TOTAL : {fmt_prix(tot_prods)} FCFA".rjust(42) + "\n"
-                                if tva_totale > 0: ticket_str += f"Dont TVA : {fmt_prix(tva_totale)} FCFA".rjust(42) + "\n"
-                                ticket_str += f"FRAIS DE LIVRAISON : {fmt_prix(frais_livraison_actuel)} FCFA".rjust(42) + "\n"
-                                ticket_str += f"TOTAL : {fmt_prix(total_commande)} FCFA".rjust(42) + "\n"
-                            else:
-                                ticket_str += f"TOTAL : {fmt_prix(total_commande)} FCFA".rjust(42) + "\n"
-                                if tva_totale > 0: ticket_str += f"Dont TVA : {fmt_prix(tva_totale)} FCFA".rjust(42) + "\n"
-                                    
-                            ticket_str += "-" * 42 + "\n"
-                            
-                            for pf in st.session_state.paiements_partiels:
-                                if not (pf['methode'] in ["À Crédit", "Note de Chambre"]):
-                                    ticket_str += f"Reçu en {pf['methode']} : {fmt_prix(pf['montant'])} FCFA".rjust(42) + "\n"
-                            
-                            if rendu_monnaie > 0:
-                                ticket_str += f"MONNAIE RENDUE : {fmt_prix(rendu_monnaie)} FCFA".rjust(42) + "\n"
-    
-                            ticket_str += "\n"
-                            ticket_str += f"{'=== MERCI DE VOTRE VISITE ===':^42}\n"
-                            
-                            if type_cmd == "Room Service" or is_credit:
-                                ticket_str += "\n"
-                                ticket_str += f"{'(Signature)':>42}\n\n"
-                            else:
-                                ticket_str += "\n\n\n"
-    
-                            if type_cmd == "Sur Place" and table_selectionnee_id:
-                                cursor.execute("UPDATE Tables_Resto SET statut = 'Libre' WHERE id = ?", (table_selectionnee_id,))
-                                cursor.execute("UPDATE Tables_Resto SET demande_addition = 0 WHERE id = ?", (table_selectionnee_id,))
-    
-                            conn.commit()
-    
-                            if auto_print:
-                                file_date_str_ticket = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-                                nom_exp = f"Ticket_Client_{cmd_id}_{file_date_str_ticket}.txt"
-                                if hasattr(os, 'startfile'): imprimer_ticket_windows(ticket_str, nom_fichier_export=nom_exp, sous_dossier="tickets")
-                                else: sauvegarder_ticket_local(ticket_str, nom_fichier_export=nom_exp, sous_dossier="tickets")
-    
-                            if auto_print_bons:
-                                bons_par_depot = {}
-                                for p_id, item in st.session_state.panier.items():
-                                    qte_nouvelle = item["qte"] - item.get("qte_envoyee", 0)
-                                    qte_off_nouvelle = item.get("qte_offert", 0) - item.get("qte_offert_envoyee", 0)
-                                    qte_ret_nouvelle = item.get("qte_retour", 0) - item.get("qte_retour_envoyee", 0)
-                                    qte_totale_print = qte_nouvelle + qte_off_nouvelle
-                                    if qte_totale_print > 0 or qte_ret_nouvelle > 0:
-                                        cursor.execute("SELECT d.nom FROM Produits p LEFT JOIN Depots d ON p.depot_id = d.id WHERE p.id = ?", (p_id,))
-                                        d_res = cursor.fetchone()
-                                        depot_name = d_res[0] if (d_res and d_res[0]) else "GENERAL"
-                                        if depot_name not in bons_par_depot: bons_par_depot[depot_name] = []
-                                        bons_par_depot[depot_name].append({"nom": item["nom"], "qte_a_imprimer": qte_totale_print, "qte_retour": qte_ret_nouvelle})
-    
-                                if bons_par_depot:
-                                    cursor.execute("SELECT compteur_bons FROM Commandes WHERE id = ?", (cmd_id,))
-                                    res_c = cursor.fetchone()
-                                    compteur = res_c[0] if res_c and res_c[0] else 0
-                                    nouveau_compteur = compteur + 1
-                                    cursor.execute("UPDATE Commandes SET compteur_bons = ? WHERE id = ?", (nouveau_compteur, cmd_id))
-                                    conn.commit()
-                                    date_now = datetime.datetime.now()
-                                    date_str = date_now.strftime(sys_format_date)
-                                    file_date_str = date_now.strftime('%Y-%m-%d_%H-%M-%S')
-                                    full_print_str = ""
-                                    for idx, (depot_name, items) in enumerate(bons_par_depot.items()):
-                                        if idx > 0: full_print_str += "\n\n" + "- " * 21 + "\n" + "--- COUPER ICI ---".center(42) + "\n" + "- " * 21 + "\n\n\n"
-                                        bon_str = f"=== BON {depot_name.upper()} ==="[:42].center(42) + "\n"
-                                        bon_str += f"BON #{cmd_id}-{nouveau_compteur} - {date_str}\n"
-                                        bon_str += f"Caissier: {st.session_state.utilisateur['nom']}\n"
-                                        bon_str += f"Type: {type_cmd}\n"
-                                        if type_cmd == "Sur Place" and table_selectionnee_id:
-                                            cursor.execute("SELECT numero_table FROM Tables_Resto WHERE id = ?", (table_selectionnee_id,))
-                                            res_table = cursor.fetchone()
-                                            if res_table: bon_str += f"Table: {res_table[0]}\n"
-                                        if type_cmd == "Room Service" and chambre_selectionnee_id:
-                                            cursor.execute("SELECT numero_chambre FROM Chambres_Hotel WHERE id = ?", (chambre_selectionnee_id,))
-                                            res_chm = cursor.fetchone()
-                                            if res_chm: bon_str += f"Chambre: {res_chm[0]}\n"
-                                        if type_cmd == "Livraison" and client_adr:
-                                            for ligne_adr in textwrap.wrap(f"Adresse: {client_adr}", width=42): bon_str += f"{ligne_adr}\n"
-                                        bon_str += "-" * 42 + "\n"
-                                        for it in items:
-                                            if it["qte_a_imprimer"] > 0: bon_str += f"{fmt_qte(it['qte_a_imprimer'])}x {it['nom']}\n"
-                                            if it["qte_retour"] > 0: bon_str += f"-{fmt_qte(it['qte_retour'])}x {it['nom']} (Annul.)\n"
-                                        bon_str += "-" * 42 + "\n"
-                                        full_print_str += bon_str
-                                    full_print_str += "\n\n\n\n"
-                                    nom_exp_b = f"Bon_{cmd_id}-{nouveau_compteur}_{file_date_str}.txt"
-                                    if hasattr(os, 'startfile'): imprimer_ticket_windows(full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons")
-                                    else: sauvegarder_ticket_local(full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons")
-    
-                            st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
-                            st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
-                            st.session_state.table_active, st.session_state.chambre_active = None, None
-                            st.session_state.active_client_name = "Passager (Anonyme)"
-                            if statut_cmd == "À Crédit" or statut_cmd == "Note de Chambre": st.success("Vente enregistrée en CRÉDIT (Note de chambre). Allez dans l'Historique pour télécharger le ticket.")
-                            else: st.success("Vente validée et stock mis à jour !")
-                            st.rerun()
+                            if bons_par_depot:
+                                cursor.execute("SELECT compteur_bons FROM Commandes WHERE id = ?", (cmd_id,))
+                                res_c = cursor.fetchone()
+                                compteur = res_c[0] if res_c and res_c[0] else 0
+                                nouveau_compteur = compteur + 1
+                                cursor.execute("UPDATE Commandes SET compteur_bons = ? WHERE id = ?", (nouveau_compteur, cmd_id))
+                                conn.commit()
+                                date_now = datetime.datetime.now()
+                                date_str = date_now.strftime(sys_format_date)
+                                file_date_str = date_now.strftime('%Y-%m-%d_%H-%M-%S')
+                                full_print_str = ""
+                                for idx, (depot_name, items) in enumerate(bons_par_depot.items()):
+                                    if idx > 0: full_print_str += "\n\n" + "- " * 21 + "\n" + "--- COUPER ICI ---".center(42) + "\n" + "- " * 21 + "\n\n\n"
+                                    bon_str = f"=== BON {depot_name.upper()} ==="[:42].center(42) + "\n"
+                                    bon_str += f"BON #{cmd_id}-{nouveau_compteur} - {date_str}\n"
+                                    bon_str += f"Caissier: {st.session_state.utilisateur['nom']}\n"
+                                    bon_str += f"Type: {type_cmd}\n"
+                                    if type_cmd == "Livraison" and client_adr:
+                                        for ligne_adr in textwrap.wrap(f"Adresse: {client_adr}", width=42): bon_str += f"{ligne_adr}\n"
+                                    bon_str += "-" * 42 + "\n"
+                                    for it in items:
+                                        if it["qte_a_imprimer"] > 0: bon_str += f"{fmt_qte(it['qte_a_imprimer'])}x {it['nom']}\n"
+                                        if it["qte_retour"] > 0: bon_str += f"-{fmt_qte(it['qte_retour'])}x {it['nom']} (Annul.)\n"
+                                    bon_str += "-" * 42 + "\n"
+                                    full_print_str += bon_str
+                                full_print_str += "\n\n\n\n"
+                                nom_exp_b = f"Bon_{cmd_id}-{nouveau_compteur}_{file_date_str}.txt"
+                                if hasattr(os, 'startfile'): imprimer_ticket_windows(full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons")
+                                else: sauvegarder_ticket_local(full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons")
 
-                if st.button("🖨️ Enregistrer & Télécharger Bons Cuisines", type="secondary", use_container_width=True):
+                        st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
+                        st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
+                        st.session_state.active_client_name = "Passager (Anonyme)"
+                        if statut_cmd == "À Crédit": st.success("Vente enregistrée en CRÉDIT. Allez dans l'Historique pour télécharger le ticket.")
+                        else: st.success("Vente validée et stock mis à jour !")
+                        st.rerun()
+                        
+                if st.button("🖨️ Enregistrer & Télécharger Bons de Préparation", type="secondary", use_container_width=True):
                     if choix_client == "+ Nouveau Client..." and client_tel:
                         cursor.execute("SELECT id FROM Clients WHERE telephone = ?", (client_tel,))
                         exists = cursor.fetchone()
                         if not exists:
                             cursor.execute("INSERT INTO Clients (nom, telephone, adresse, zone_id) VALUES (?, ?, ?, ?)", (client_nom, client_tel, client_adr, zone_id_selected))
                             client_id_db = cursor.lastrowid
-                        else: client_id_db = exists[0]
+                        else: 
+                            client_id_db = exists[0]
 
                     if st.session_state.commande_id_en_cours is None:
-                        if type_cmd == "Sur Place" and table_selectionnee_id:
-                            cursor.execute("SELECT id FROM Commandes WHERE table_id = ? AND statut = 'En attente'", (table_selectionnee_id,))
-                            dup = cursor.fetchone()
-                            if dup: st.session_state.commande_id_en_cours = dup[0]
-                        elif type_cmd == "Room Service" and chambre_selectionnee_id:
-                            cursor.execute("SELECT id FROM Commandes WHERE chambre_id = ? AND statut = 'En attente'", (chambre_selectionnee_id,))
-                            dup = cursor.fetchone()
-                            if dup: st.session_state.commande_id_en_cours = dup[0]
-
-                    if st.session_state.commande_id_en_cours is None:
-                        cursor.execute("INSERT INTO Commandes (type_commande, table_id, chambre_id, statut, total, pourboire, nom_client, telephone, adresse, client_id, utilisateur_id, zone_id, frais_livraison) VALUES (?, ?, ?, 'En attente', ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, table_selectionnee_id, chambre_selectionnee_id, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
+                        cursor.execute("INSERT INTO Commandes (type_commande, statut, total, pourboire, nom_client, telephone, adresse, client_id, utilisateur_id, zone_id, frais_livraison) VALUES (?, 'En attente', ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
                         cmd_id = cursor.lastrowid
                     else:
                         cmd_id = st.session_state.commande_id_en_cours
-                        cursor.execute("UPDATE Commandes SET total = ?, pourboire = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ?, table_id = ?, chambre_id = ? WHERE id = ?", (total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, table_selectionnee_id, chambre_selectionnee_id, cmd_id))
+                        cursor.execute("UPDATE Commandes SET total = ?, pourboire = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ? WHERE id = ?", (total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, cmd_id))
                         cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (cmd_id,))
 
                     bons_par_depot = {}
@@ -2508,7 +2133,8 @@ elif menu == "Prise de Commande":
                             cursor.execute("SELECT d.nom FROM Produits p LEFT JOIN Depots d ON p.depot_id = d.id WHERE p.id = ?", (p_id,))
                             d_res = cursor.fetchone()
                             depot_name = d_res[0] if (d_res and d_res[0]) else "GENERAL"
-                            if depot_name not in bons_par_depot: bons_par_depot[depot_name] = []
+                            if depot_name not in bons_par_depot: 
+                                bons_par_depot[depot_name] = []
                             bons_par_depot[depot_name].append({"nom": item["nom"], "qte_a_imprimer": qte_totale_print, "qte_retour": qte_ret_nouvelle})
 
                     for p_id in st.session_state.panier:
@@ -2517,12 +2143,13 @@ elif menu == "Prise de Commande":
                         st.session_state.panier[p_id]["qte_retour_envoyee"] = st.session_state.panier[p_id].get("qte_retour", 0)
 
                     for p_id, item in st.session_state.panier.items():
-                        if item["qte"] > 0: cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (cmd_id, p_id, item["qte"], item["prix_base"], item["prix_base"] * item["qte"], item.get("qte_envoyee", 0), item.get("qte_offert_envoyee", 0), 0))
-                        if item.get("qte_offert", 0) > 0: cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, 0.0, 0.0, 0, ?, 0)", (cmd_id, p_id, item["qte_offert"], item.get("qte_offert_envoyee", 0)))
-                        if item.get("qte_retour", 0) > 0: cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, 0, 0, ?)", (cmd_id, p_id, -item["qte_retour"], item["prix_base"], -item["prix_base"] * item["qte_retour"], item.get("qte_retour_envoyee", 0)))
+                        if item["qte"] > 0: 
+                            cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (cmd_id, p_id, item["qte"], item["prix_base"], item["prix_base"] * item["qte"], item.get("qte_envoyee", 0), item.get("qte_offert_envoyee", 0), 0))
+                        if item.get("qte_offert", 0) > 0: 
+                            cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, 0.0, 0.0, 0, ?, 0)", (cmd_id, p_id, item["qte_offert"], item.get("qte_offert_envoyee", 0)))
+                        if item.get("qte_retour", 0) > 0: 
+                            cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, 0, 0, ?)", (cmd_id, p_id, -item["qte_retour"], item["prix_base"], -item["prix_base"] * item["qte_retour"], item.get("qte_retour_envoyee", 0)))
 
-                    if type_cmd == "Sur Place" and table_selectionnee_id: cursor.execute("UPDATE Tables_Resto SET statut = 'Occupée' WHERE id = ?", (table_selectionnee_id,))
-                    
                     if bons_par_depot:
                         cursor.execute("SELECT compteur_bons FROM Commandes WHERE id = ?", (cmd_id,))
                         res_c = cursor.fetchone()
@@ -2538,546 +2165,439 @@ elif menu == "Prise de Commande":
                         file_date_str = date_now.strftime('%Y-%m-%d_%H-%M-%S')
                         full_print_str = ""
                         for idx, (depot_name, items) in enumerate(bons_par_depot.items()):
-                            if idx > 0: full_print_str += "\n\n" + "- " * 21 + "\n" + "--- COUPER ICI ---".center(42) + "\n" + "- " * 21 + "\n\n\n"
+                            if idx > 0: 
+                                full_print_str += "\n\n" + "- " * 21 + "\n" + "--- COUPER ICI ---".center(42) + "\n" + "- " * 21 + "\n\n\n"
                             bon_str = f"=== BON {depot_name.upper()} ==="[:42].center(42) + "\n"
                             bon_str += f"BON #{cmd_id}-{nouveau_compteur} - {date_str}\n"
                             bon_str += f"Caissier: {st.session_state.utilisateur['nom']}\n"
                             bon_str += f"Type: {type_cmd}\n"
-                            if type_cmd == "Sur Place" and table_selectionnee_id:
-                                cursor.execute("SELECT numero_table FROM Tables_Resto WHERE id = ?", (table_selectionnee_id,))
-                                res_table = cursor.fetchone()
-                                if res_table: bon_str += f"Table: {res_table[0]}\n"
-                            if type_cmd == "Room Service" and chambre_selectionnee_id:
-                                cursor.execute("SELECT numero_chambre FROM Chambres_Hotel WHERE id = ?", (chambre_selectionnee_id,))
-                                res_chm = cursor.fetchone()
-                                if res_chm: bon_str += f"Chambre: {res_chm[0]}\n"
                             if type_cmd == "Livraison" and client_adr:
-                                for ligne_adr in textwrap.wrap(f"Adresse: {client_adr}", width=42): bon_str += f"{ligne_adr}\n"
+                                for ligne_adr in textwrap.wrap(f"Adresse: {client_adr}", width=42): 
+                                    bon_str += f"{ligne_adr}\n"
                             bon_str += "-" * 42 + "\n"
                             for it in items:
-                                if it["qte_a_imprimer"] > 0: bon_str += f"{fmt_qte(it['qte_a_imprimer'])}x {it['nom']}\n"
-                                if it["qte_retour"] > 0: bon_str += f"-{fmt_qte(it['qte_retour'])}x {it['nom']} (Annul.)\n"
+                                if it["qte_a_imprimer"] > 0: 
+                                    bon_str += f"{fmt_qte(it['qte_a_imprimer'])}x {it['nom']}\n"
+                                if it["qte_retour"] > 0: 
+                                    bon_str += f"-{fmt_qte(it['qte_retour'])}x {it['nom']} (Annul.)\n"
                             bon_str += "-" * 42 + "\n"
                             full_print_str += bon_str
                         full_print_str += "\n\n\n\n"
                         nom_exp_b = f"Bon_{cmd_id}-{nouveau_compteur}_{file_date_str}.txt"
-                        if hasattr(os, 'startfile'): imprimer_ticket_windows(full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons")
-                        else: sauvegarder_ticket_local(full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons")
-                        msg_print = "Nouveaux plats envoyés en préparation et imprimés !"
-                    else: msg_print = "Rien de nouveau à imprimer pour la cuisine/bar."
+                        if hasattr(os, 'startfile'): 
+                            imprimer_ticket_windows(full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons")
+                        else: 
+                            sauvegarder_ticket_local(full_print_str, nom_fichier_export=nom_exp_b, sous_dossier="bons")
+                        msg_print = "Nouveaux articles envoyés en préparation et imprimés !"
+                    else: 
+                        msg_print = "Rien de nouveau à imprimer."
 
                     st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
                     st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
-                    st.session_state.table_active, st.session_state.chambre_active = None, None
                     st.session_state.active_client_name = "Passager (Anonyme)"
                     st.success(f"Ticket mis en attente. {msg_print}")
                     st.rerun()
 
         with col_menu:
-            menu_lock, msg_lock = False, ""
-            if type_cmd == "Sur Place":
-                if not table_selectionnee_id:
-                    menu_lock = True; msg_lock = "⚠️ Veuillez sélectionner une Table à gauche pour ouvrir le menu."
-                else:
-                    cursor.execute("SELECT id FROM Commandes WHERE table_id = ? AND statut = 'En attente'", (table_selectionnee_id,))
-                    cmd_existante = cursor.fetchone()
-                    if cmd_existante and st.session_state.commande_id_en_cours != cmd_existante[0]:
-                        menu_lock = True; msg_lock = f"⚠️ La table est occupée (Ticket #{cmd_existante[0]}). Cliquez sur 'Charger le ticket' dans les informations pour y ajouter des articles."
-            elif type_cmd == "Room Service":
-                if not chambre_selectionnee_id:
-                    menu_lock = True; msg_lock = "⚠️ Veuillez sélectionner une Chambre à gauche pour ouvrir le menu."
-                else:
-                    cursor.execute("SELECT id FROM Commandes WHERE chambre_id = ? AND statut = 'En attente'", (chambre_selectionnee_id,))
-                    cmd_existante = cursor.fetchone()
-                    if cmd_existante and st.session_state.commande_id_en_cours != cmd_existante[0]:
-                        menu_lock = True; msg_lock = f"⚠️ Un ticket est en cours pour cette chambre (#{cmd_existante[0]}). Cliquez sur 'Charger le ticket' ci-dessus."
-
-            if menu_lock: 
-                st.error(msg_lock)
-                st.markdown("---")
-                st.markdown("### 🟢 Tables Occupées & Tickets en cours")
-                
-                cursor.execute("""
-                    SELECT c.id, c.type_commande, c.total, t.numero_table, ch.numero_chambre, COALESCE(cl.nom, c.nom_client), s.nom
-                    FROM Commandes c
-                    LEFT JOIN Tables_Resto t ON c.table_id = t.id
-                    LEFT JOIN Salles s ON t.salle_id = s.id
-                    LEFT JOIN Chambres_Hotel ch ON c.chambre_id = ch.id
-                    LEFT JOIN Clients cl ON c.client_id = cl.id
-                    WHERE c.statut = 'En attente'
-                    ORDER BY c.date_creation DESC
-                """)
-                open_tickets = cursor.fetchall()
-                
-                if open_tickets:
-                    cols_open = st.columns(3)
-                    for idx, (c_id_att, t_cmd, tot, num_t, num_ch, n_cli, nom_s) in enumerate(open_tickets):
-                        with cols_open[idx % 3]:
-                            btn_label = f"Ticket #{c_id_att} - {t_cmd}\n"
-                            if num_t: btn_label += f"🪑 {nom_s} : {num_t}\n"
-                            elif num_ch: btn_label += f"🛏️ Ch. {num_ch}\n"
-                            elif n_cli: btn_label += f"👤 {n_cli}\n"
-                            btn_label += f"💰 {fmt_prix(tot)} F"
+            st.markdown("#### 🍔 Menu & Produits")
+            df_all_prods = pd.read_sql_query("SELECT p.id, p.nom, p.prix, p.applique_tva, p.code_barre, c.tva as tva_rate FROM Produits p JOIN Categories c ON p.categorie_id = c.id WHERE p.est_vendable = 1 ORDER BY p.nom", conn)
+            if not df_all_prods.empty:
+                dict_all_prods = {}
+                for _, row in df_all_prods.iterrows():
+                    lbl_code = f"[{row['code_barre']}] " if pd.notna(row['code_barre']) and str(row['code_barre']).strip() != "" else ""
+                    dict_all_prods[f"{lbl_code}{row['nom']} - {fmt_prix(row['prix'])} F"] = row['id']
+                    
+                with st.form("form_search_add", clear_on_submit=True):
+                    col_scan, col_search, col_sbtn = st.columns([1.5, 3.5, 1])
+                    code_scanne = col_scan.text_input("Douchette", placeholder="Scanner code...")
+                    plat_recherche = col_search.selectbox("Ou Recherche manuelle", options=list(dict_all_prods.keys()), index=None, label_visibility="collapsed")
+                    
+                    if col_sbtn.form_submit_button("➕ Ajouter", use_container_width=True):
+                        p_id = None
+                        if code_scanne:
+                            match_prod = df_all_prods[df_all_prods['code_barre'] == str(code_scanne).strip()]
+                            if not match_prod.empty: p_id = int(match_prod.iloc[0]['id'])
+                            else: st.error("⚠️ Code barre introuvable !")
+                        elif plat_recherche:
+                            p_id = int(dict_all_prods[plat_recherche])
                             
-                            if st.button(btn_label, key=f"open_att_{c_id_att}", use_container_width=True):
-                                st.session_state.commande_id_en_cours = c_id_att
-                                st.session_state.paiements_partiels = []
-                                st.session_state.pourboire_ticket = 0.0
+                        if p_id:
+                            row_prod = df_all_prods[df_all_prods['id'] == p_id].iloc[0]
+                            if p_id in st.session_state.panier: 
+                                st.session_state.panier[p_id]["qte"] += 1
+                                st.session_state[f"in_qte_{p_id}"] = float(st.session_state.panier[p_id]["qte"])
+                            else: 
+                                st.session_state.panier[p_id] = {"nom": row_prod["nom"], "prix_base": float(row_prod["prix"]), "qte": 1, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row_prod["applique_tva"]), "tva_rate": float(row_prod["tva_rate"])}
+                            st.rerun()
+            
+            st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
+            
+            df_categories = pd.read_sql_query("SELECT id, nom FROM Categories ORDER BY nom", conn)
+            if not df_categories.empty:
+                onglets = st.tabs(df_categories["nom"].tolist())
+                for i, onglet in enumerate(onglets):
+                    cat_id = int(df_categories.iloc[i]["id"])
+                    
+                    df_prods = pd.read_sql_query("""
+                        SELECT p.id, p.nom, p.prix, p.applique_tva, c.tva as tva_rate, sc.nom as scat_nom 
+                        FROM Produits p 
+                        JOIN Categories c ON p.categorie_id = c.id 
+                        LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id 
+                        WHERE p.categorie_id = ? AND p.est_vendable = 1 
+                        ORDER BY sc.nom, p.nom
+                    """, conn, params=(cat_id,))
+                    
+                    with onglet:
+                        if not df_prods.empty:
+                            df_prods['scat_nom'] = df_prods['scat_nom'].fillna("Général")
+                            
+                            for scat_nom, group in df_prods.groupby('scat_nom'):
+                                st.markdown(f"<h6 style='color:#0288d1; margin-top:10px;'>{scat_nom}</h6>", unsafe_allow_html=True)
+                                cols_produits = st.columns(4)
                                 
-                                cursor.execute("SELECT table_id, chambre_id, type_commande, client_id FROM Commandes WHERE id = ?", (c_id_att,))
-                                ctx = cursor.fetchone()
-                                if ctx:
-                                    st.session_state.table_active = ctx[0]
-                                    st.session_state.chambre_active = ctx[1]
-                                    st.session_state.radio_type_cmd = ctx[2]
-                                    cli_id_att = ctx[3]
-                                    if cli_id_att:
-                                        cursor.execute("SELECT id, nom, telephone FROM Clients WHERE id = ?", (cli_id_att,))
-                                        cli_res = cursor.fetchone()
-                                        if cli_res: st.session_state.active_client_name = f"CLI-{cli_res[0]:04d} : {cli_res[1]} ({cli_res[2]})"
-                                        else: st.session_state.active_client_name = "Passager (Anonyme)"
-                                    else:
-                                        st.session_state.active_client_name = "Passager (Anonyme)"
-                                
-                                df_lignes = pd.read_sql_query("SELECT lc.produit_id as id, p.nom, p.prix as prix_base, lc.prix_unitaire as prix, lc.quantite as qte, lc.quantite_envoyee, lc.quantite_offert_envoyee, lc.quantite_retour_envoyee, p.applique_tva, c.tva as tva_rate FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id JOIN Categories c ON p.categorie_id = c.id WHERE lc.commande_id = ?", conn, params=(c_id_att,))
-                                st.session_state.panier = {}
-                                for _, row in df_lignes.iterrows():
-                                    p_id, qte, prix_ligne, prix_b = int(row["id"]), int(row["qte"]), float(row["prix"]), float(row["prix_base"])
-                                    qte_env = int(row["quantite_envoyee"]) if not pd.isna(row.get("quantite_envoyee")) else 0
-                                    qte_off_env = int(row["quantite_offert_envoyee"]) if not pd.isna(row.get("quantite_offert_envoyee")) else 0
-                                    qte_ret_env = int(row["quantite_retour_envoyee"]) if not pd.isna(row.get("quantite_retour_envoyee")) else 0
+                                for index, row in group.reset_index().iterrows():
+                                    col_idx = index % 4
+                                    if cols_produits[col_idx].button(f"{row['nom']}\n{fmt_prix(row['prix'])} F", key=f"btn_prod_{row['id']}", use_container_width=True):
+                                        p_id = int(row["id"])
+                                        if p_id in st.session_state.panier: 
+                                            st.session_state.panier[p_id]["qte"] += 1
+                                        else: 
+                                            st.session_state.panier[p_id] = {"nom": row["nom"], "prix_base": float(row["prix"]), "qte": 1, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row["applique_tva"]), "tva_rate": float(row["tva_rate"])}
+                                        st.rerun()
 
-                                    if p_id not in st.session_state.panier: st.session_state.panier[p_id] = {"nom": row["nom"], "prix_base": prix_b, "qte": 0, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row["applique_tva"]), "tva_rate": float(row["tva_rate"])}
-                                    if qte > 0:
-                                        if prix_ligne == 0: st.session_state.panier[p_id]["qte_offert"] += qte; st.session_state.panier[p_id]["qte_offert_envoyee"] += qte_off_env
-                                        else: st.session_state.panier[p_id]["qte"] += qte; st.session_state.panier[p_id]["qte_envoyee"] += qte_env
-                                    elif qte < 0: st.session_state.panier[p_id]["qte_retour"] += abs(qte); st.session_state.panier[p_id]["qte_retour_envoyee"] += qte_ret_env
-                                st.rerun()
-                else:
-                    st.info("Aucun ticket en attente actuellement. Sélectionnez une table à gauche pour ouvrir un nouveau ticket.")
-            else:
-                st.markdown("#### 🍔 Menu & Produits")
-                df_all_prods = pd.read_sql_query("SELECT p.id, p.nom, p.prix, p.applique_tva, p.code_barre, c.tva as tva_rate FROM Produits p JOIN Categories c ON p.categorie_id = c.id WHERE p.est_vendable = 1 ORDER BY p.nom", conn)
-                if not df_all_prods.empty:
-                    dict_all_prods = {}
-                    for _, row in df_all_prods.iterrows():
-                        lbl_code = f"[{row['code_barre']}] " if pd.notna(row['code_barre']) and str(row['code_barre']).strip() != "" else ""
-                        dict_all_prods[f"{lbl_code}{row['nom']} - {fmt_prix(row['prix'])} F"] = row['id']
-                        
-                    with st.form("form_search_add", clear_on_submit=True):
-                        col_scan, col_search, col_sbtn = st.columns([1.5, 3.5, 1])
-                        code_scanne = col_scan.text_input("Douchette", placeholder="Scanner code...")
-                        plat_recherche = col_search.selectbox("Ou Recherche manuelle", options=list(dict_all_prods.keys()), index=None, label_visibility="collapsed")
-                        
-                        if col_sbtn.form_submit_button("➕ Ajouter", use_container_width=True):
-                            p_id = None
-                            if code_scanne:
-                                match_prod = df_all_prods[df_all_prods['code_barre'] == str(code_scanne).strip()]
-                                if not match_prod.empty: p_id = int(match_prod.iloc[0]['id'])
-                                else: st.error("⚠️ Code barre introuvable !")
-                            elif plat_recherche:
-                                p_id = int(dict_all_prods[plat_recherche])
-                                
-                            if p_id:
-                                row_prod = df_all_prods[df_all_prods['id'] == p_id].iloc[0]
-                                if p_id in st.session_state.panier: 
-                                    st.session_state.panier[p_id]["qte"] += 1
-                                else: 
-                                    st.session_state.panier[p_id] = {"nom": row_prod["nom"], "prix_base": float(row_prod["prix"]), "qte": 1, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row_prod["applique_tva"]), "tva_rate": float(row_prod["tva_rate"])}
-                                st.rerun()
-                
-                st.markdown("<div style='margin-bottom: 10px;'></div>", unsafe_allow_html=True)
-                
-                df_categories = pd.read_sql_query("SELECT id, nom FROM Categories WHERE afficher_caisse = 1 ORDER BY nom", conn)
-                if not df_categories.empty:
-                    onglets = st.tabs(df_categories["nom"].tolist())
-                    for i, onglet in enumerate(onglets):
-                        cat_id = int(df_categories.iloc[i]["id"])
-                        
-                        df_prods = pd.read_sql_query("""
-                            SELECT p.id, p.nom, p.prix, p.applique_tva, c.tva as tva_rate, sc.nom as scat_nom 
-                            FROM Produits p 
-                            JOIN Categories c ON p.categorie_id = c.id 
-                            LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id 
-                            WHERE p.categorie_id = ? AND p.est_vendable = 1 
-                            ORDER BY sc.nom, p.nom
-                        """, conn, params=(cat_id,))
-                        
-                        with onglet:
-                            if not df_prods.empty:
-                                df_prods['scat_nom'] = df_prods['scat_nom'].fillna("Général")
-                                
-                                for scat_nom, group in df_prods.groupby('scat_nom'):
-                                    st.markdown(f"<h6 style='color:#0288d1; margin-top:10px;'>{scat_nom}</h6>", unsafe_allow_html=True)
-                                    cols_produits = st.columns(4)
-                                    
-                                    for index, row in group.reset_index().iterrows():
-                                        col_idx = index % 4
-                                        if cols_produits[col_idx].button(f"{row['nom']}\n{fmt_prix(row['prix'])} F", key=f"btn_prod_{row['id']}", use_container_width=True):
-                                            p_id = int(row["id"])
-                                            if p_id in st.session_state.panier: 
-                                                st.session_state.panier[p_id]["qte"] += 1
-                                            else: 
-                                                st.session_state.panier[p_id] = {"nom": row["nom"], "prix_base": float(row["prix"]), "qte": 1, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row["applique_tva"]), "tva_rate": float(row["tva_rate"])}
-                                            st.rerun()
-                else: st.warning("Le menu est vide.")
+    with tab_historique:
+        st.subheader("📜 Historique des Tickets")
+        df_historique = pd.read_sql_query("""
+            SELECT c.id as 'N°', c.date_creation as 'Date Création', c.date_paiement as 'Encaissement', c.type_commande as 'Type', COALESCE(cl.nom, c.nom_client, '-') as 'Client', u.nom as 'Caissier', COALESCE(c.methode_paiement, '-') as 'Paiement', 
+            COALESCE((SELECT SUM(lc.sous_total - (lc.sous_total / (1 + cat.tva / 100))) FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id JOIN Categories cat ON p.categorie_id = cat.id WHERE lc.commande_id = c.id AND p.applique_tva = 1 AND cat.tva > 0), 0) as 'TVA',
+            c.total as 'Total TTC', c.pourboire as 'Pourboire', c.statut as 'Statut', c.utilisateur_id 
+            FROM Commandes c 
+            LEFT JOIN Clients cl ON c.client_id = cl.id 
+            LEFT JOIN Utilisateurs u ON c.utilisateur_id = u.id 
+            ORDER BY c.id DESC LIMIT 1000
+        """, conn)
 
-    if role_actif != "Serveur":
-        with tab_historique:
-            if role_actif == "Manager":
-                with st.expander("🚨 MODE TEST : Remise à zéro de l'historique"):
-                    if st.button("💥 Confirmer la suppression de l'historique"):
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT m.produit_id, m.depot_id, m.quantite, p.composition_id, p.composition_qte FROM Mouvements_Stock m JOIN Produits p ON m.produit_id=p.id WHERE m.reference LIKE 'Vente - Ticket %'")
-                        for pid, did, qte, cid, cqte in cursor.fetchall():
-                            base_id = cid if cid else pid
-                            mult = float(cqte) if cid else 1.0
-                            cursor.execute("UPDATE Stock_Articles SET quantite = quantite + ? WHERE produit_id = ? AND depot_id = ?", (qte*mult, base_id, did))
-                        cursor.execute("DELETE FROM Mouvements_Stock WHERE reference LIKE 'Vente - Ticket %'")
-                        cursor.execute("DELETE FROM Lignes_Commande"); cursor.execute("DELETE FROM Paiements_Ticket"); cursor.execute("DELETE FROM Commandes")
-                        cursor.execute("UPDATE Tables_Resto SET statut = 'Libre', demande_addition = 0"); cursor.execute("DELETE FROM sqlite_sequence WHERE name='Commandes'")
-                        conn.commit(); st.success("Historique nettoyé et stocks réajustés !"); st.rerun()
+        if not df_historique.empty and role_actif != "Manager":
+            df_historique = df_historique[df_historique["utilisateur_id"] == st.session_state.utilisateur["id"]]
 
-            st.subheader("📜 Historique des Tickets")
-            df_historique = pd.read_sql_query("""
-                SELECT c.id as 'N°', c.date_creation as 'Date Création', c.date_paiement as 'Encaissement', c.type_commande as 'Type', 
-                CASE WHEN t.numero_table IS NOT NULL AND ch.numero_chambre IS NOT NULL THEN t.numero_table || ' (Ch. ' || ch.numero_chambre || ')' WHEN t.numero_table IS NOT NULL THEN t.numero_table WHEN ch.numero_chambre IS NOT NULL THEN ch.numero_chambre ELSE '-' END as 'Table/Chambre', 
-                COALESCE(cl.nom, c.nom_client, '-') as 'Client', u.nom as 'Caissier', COALESCE(c.methode_paiement, '-') as 'Paiement', 
-                COALESCE((SELECT SUM(lc.sous_total - (lc.sous_total / (1 + cat.tva / 100))) FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id JOIN Categories cat ON p.categorie_id = cat.id WHERE lc.commande_id = c.id AND p.applique_tva = 1 AND cat.tva > 0), 0) as 'TVA',
-                c.total as 'Total TTC', c.pourboire as 'Pourboire', c.statut as 'Statut', c.utilisateur_id 
-                FROM Commandes c 
-                LEFT JOIN Tables_Resto t ON c.table_id = t.id 
-                LEFT JOIN Chambres_Hotel ch ON c.chambre_id = ch.id 
-                LEFT JOIN Clients cl ON c.client_id = cl.id 
-                LEFT JOIN Utilisateurs u ON c.utilisateur_id = u.id 
-                ORDER BY c.id DESC LIMIT 1000
-            """, conn)
+        if df_historique.empty: 
+            st.info("Aucun ticket dans l'historique.")
+        else:
+            df_historique['Total HT'] = df_historique['Total TTC'] - df_historique['TVA']
+            df_historique = df_historique[['N°', 'Date Création', 'Encaissement', 'Type', 'Client', 'Caissier', 'Paiement', 'Total HT', 'TVA', 'Total TTC', 'Pourboire', 'Statut', 'utilisateur_id']]
 
-            if not df_historique.empty and role_actif != "Manager":
-                df_historique = df_historique[df_historique["utilisateur_id"] == st.session_state.utilisateur["id"]]
+            params_db = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
+            heure_fin = int(params_db.get("heure_fin_service", 5))
+            df_historique['Date_Calc'] = pd.to_datetime(df_historique['Encaissement'].fillna(df_historique['Date Création']))
+            df_historique['Date_Exploitation'] = (df_historique['Date_Calc'] - pd.Timedelta(hours=heure_fin)).dt.date
+            
+            c_f1, c_f2, c_f3 = st.columns(3)
+            c_f5, c_f6, c_f7 = st.columns(3)
 
-            if df_historique.empty: 
-                st.info("Aucun ticket dans l'historique.")
-            else:
-                df_historique['Total HT'] = df_historique['Total TTC'] - df_historique['TVA']
-                df_historique = df_historique[['N°', 'Date Création', 'Encaissement', 'Type', 'Table/Chambre', 'Client', 'Caissier', 'Paiement', 'Total HT', 'TVA', 'Total TTC', 'Pourboire', 'Statut', 'utilisateur_id']]
+            dates_dispos = list(df_historique['Date_Exploitation'].unique())
+            date_list = ["Toutes"] + dates_dispos
+            aujourdhui_biz = (datetime.datetime.now() - datetime.timedelta(hours=heure_fin)).date()
+            default_idx = date_list.index(aujourdhui_biz) if aujourdhui_biz in date_list else (1 if len(date_list) > 1 else 0)
 
-                params_db = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
-                heure_fin = int(params_db.get("heure_fin_service", 5))
-                df_historique['Date_Calc'] = pd.to_datetime(df_historique['Encaissement'].fillna(df_historique['Date Création']))
-                df_historique['Date_Exploitation'] = (df_historique['Date_Calc'] - pd.Timedelta(hours=heure_fin)).dt.date
-                
-                c_f1, c_f2, c_f3 = st.columns(3)
-                c_f4, c_f5, c_f6, c_f7 = st.columns(4)
+            f_date = c_f1.selectbox("Date d'Exploitation :", date_list, index=default_idx)
+            f_type = c_f2.selectbox("Type :", ["Tous"] + list(df_historique["Type"].unique()))
+            f_statut = c_f3.selectbox("Statut :", ["Tous"] + list(df_historique["Statut"].unique()))
+            f_client = c_f5.selectbox("Client :", ["Tous"] + sorted(list(df_historique["Client"].astype(str).unique())))
+            f_caissier = c_f6.selectbox("Caissier :", ["Tous"] + sorted(list(df_historique["Caissier"].astype(str).unique()))) if role_actif == "Manager" else "Tous"
+            f_paiement = c_f7.selectbox("Paiement :", ["Tous"] + sorted(list(df_historique["Paiement"].astype(str).unique())))
 
-                dates_dispos = list(df_historique['Date_Exploitation'].unique())
-                date_list = ["Toutes"] + dates_dispos
-                aujourdhui_biz = (datetime.datetime.now() - datetime.timedelta(hours=heure_fin)).date()
-                default_idx = date_list.index(aujourdhui_biz) if aujourdhui_biz in date_list else (1 if len(date_list) > 1 else 0)
+            df_filtre = df_historique.copy()
+            if f_date != "Toutes": df_filtre = df_filtre[df_filtre["Date_Exploitation"] == f_date]
+            if f_type != "Tous": df_filtre = df_filtre[df_filtre["Type"] == f_type]
+            if f_statut != "Tous": df_filtre = df_filtre[df_filtre["Statut"] == f_statut]
+            if f_client != "Tous": df_filtre = df_filtre[df_filtre["Client"] == f_client]
+            if f_caissier != "Tous": df_filtre = df_filtre[df_filtre["Caissier"] == f_caissier]
+            if f_paiement != "Tous": df_filtre = df_filtre[df_filtre["Paiement"] == f_paiement]
 
-                f_date = c_f1.selectbox("Date d'Exploitation :", date_list, index=default_idx)
-                f_type = c_f2.selectbox("Type :", ["Tous"] + list(df_historique["Type"].unique()))
-                f_statut = c_f3.selectbox("Statut :", ["Tous"] + list(df_historique["Statut"].unique()))
-                f_table = c_f4.selectbox("Table/Chambre :", ["Toutes"] + sorted(list(df_historique["Table/Chambre"].astype(str).unique())))
-                f_client = c_f5.selectbox("Client :", ["Tous"] + sorted(list(df_historique["Client"].astype(str).unique())))
-                f_caissier = c_f6.selectbox("Caissier :", ["Tous"] + sorted(list(df_historique["Caissier"].astype(str).unique()))) if role_actif == "Manager" else "Tous"
-                f_paiement = c_f7.selectbox("Paiement :", ["Tous"] + sorted(list(df_historique["Paiement"].astype(str).unique())))
+            st.divider()
+            
+            df_valide = df_filtre[df_filtre['Statut'].isin(['Payée', 'À Crédit'])]
+            ca_ttc_tot = df_valide['Total TTC'].sum()
+            tva_tot = df_valide['TVA'].sum()
+            ca_ht_tot = df_valide['Total HT'].sum()
+            pourboires_tot = df_valide['Pourboire'].sum()
+            
+            ct1, ct2, ct3, ct4 = st.columns(4)
+            ct1.markdown(f"#### 💰 CA TTC : {fmt_prix(ca_ttc_tot)} FCFA")
+            ct2.markdown(f"#### 📦 CA HT : {fmt_prix(ca_ht_tot)} FCFA")
+            ct3.markdown(f"#### 🏷️ TVA : {fmt_prix(tva_tot)} FCFA")
+            ct4.markdown(f"#### 🎁 Pourboire : {fmt_prix(pourboires_tot)} FCFA")
 
-                df_filtre = df_historique.copy()
-                if f_date != "Toutes": df_filtre = df_filtre[df_filtre["Date_Exploitation"] == f_date]
-                if f_type != "Tous": df_filtre = df_filtre[df_filtre["Type"] == f_type]
-                if f_statut != "Tous": df_filtre = df_filtre[df_filtre["Statut"] == f_statut]
-                if f_table != "Toutes": df_filtre = df_filtre[df_filtre["Table/Chambre"] == f_table]
-                if f_client != "Tous": df_filtre = df_filtre[df_filtre["Client"] == f_client]
-                if f_caissier != "Tous": df_filtre = df_filtre[df_filtre["Caissier"] == f_caissier]
-                if f_paiement != "Tous": df_filtre = df_filtre[df_filtre["Paiement"] == f_paiement]
+            def color_statut(val):
+                if val in ["À Crédit"]: return "color: orange; font-weight: bold;"
+                elif val == "Payée": return "color: green;"
+                elif val == "Annulée": return "color: red; text-decoration: line-through;"
+                return ""
 
-                st.divider()
-                
-                ca_ttc_tot = df_filtre['Total TTC'].sum()
-                tva_tot = df_filtre['TVA'].sum()
-                ca_ht_tot = df_filtre['Total HT'].sum()
-                pourboires_tot = df_filtre['Pourboire'].sum()
-                
-                ct1, ct2, ct3, ct4 = st.columns(4)
-                ct1.markdown(f"#### 💰 CA TTC : {fmt_prix(ca_ttc_tot)} FCFA")
-                ct2.markdown(f"#### 📦 CA HT : {fmt_prix(ca_ht_tot)} FCFA")
-                ct3.markdown(f"#### 🏷️ TVA : {fmt_prix(tva_tot)} FCFA")
-                ct4.markdown(f"#### 🎁 Pourboires : {fmt_prix(pourboires_tot)} FCFA")
+            df_afficher_hist = df_filtre.drop(columns=["Date_Calc", "Date_Exploitation", "utilisateur_id"], errors='ignore')
+            df_afficher_hist['Date Création'] = df_afficher_hist['Date Création'].apply(fmt_date)
+            df_afficher_hist['Encaissement'] = df_afficher_hist['Encaissement'].apply(fmt_date)
+            df_afficher_hist['Total HT'] = df_afficher_hist['Total HT'].apply(fmt_prix)
+            df_afficher_hist['TVA'] = df_afficher_hist['TVA'].apply(fmt_prix)
+            df_afficher_hist['Total TTC'] = df_afficher_hist['Total TTC'].apply(fmt_prix)
+            df_afficher_hist['Pourboire'] = df_afficher_hist['Pourboire'].apply(fmt_prix)
+            
+            st.dataframe(df_afficher_hist.style.map(color_statut, subset=["Statut"]), use_container_width=True, hide_index=True)
+            
+            col_exp_h1, col_exp_h2 = st.columns(2)
+            date_str_file_hist = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            
+            col_exp_h1.download_button(
+                label="📥 Exporter en CSV (Excel)", 
+                data=convert_df_to_csv(df_afficher_hist), 
+                file_name=f"Historique_Ventes_{date_str_file_hist}.csv", 
+                mime="text/csv", 
+                use_container_width=True
+            )
+            
+            html_report_hist = f"""
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>Historique des Ventes</title>
+                <style>
+                    body {{ font-family: sans-serif; margin: 20px; }}
+                    h2 {{ text-align: center; color: #333; }}
+                    table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+                    th, td {{ border: 1px solid #aaa; padding: 8px; text-align: left; font-size: 14px; }}
+                    th {{ background: #eee; font-weight: bold; }}
+                    .summary {{ text-align: center; margin-bottom: 20px; font-size: 1.2em; font-weight: bold; color: #0288d1; }}
+                    @media print {{ button {{ display: none; }} }}
+                </style>
+            </head>
+            <body>
+                <h2>Historique des Ventes - Édité le {datetime.datetime.now().strftime(sys_format_date)}</h2>
+                <div class="summary">CA TTC : {fmt_prix(ca_ttc_tot)} FCFA | CA HT : {fmt_prix(ca_ht_tot)} FCFA | TVA : {fmt_prix(tva_tot)} FCFA | Pourboires : {fmt_prix(pourboires_tot)} FCFA</div>
+                <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter en PDF / Imprimer</button>
+                {df_afficher_hist.to_html(index=False)}
+            </body>
+            </html>
+            """
+            
+            col_exp_h2.download_button(
+                label="🖨️ Imprimer / Exporter en PDF", 
+                data=html_report_hist, 
+                file_name=f"Historique_Ventes_{date_str_file_hist}.html", 
+                mime="text/html", 
+                use_container_width=True
+            )
 
-                def color_statut(val):
-                    if val in ["À Crédit", "Note de Chambre"]: return "color: orange; font-weight: bold;"
-                    elif val == "Payée": return "color: green;"
-                    elif val == "Annulé": return "color: red; text-decoration: line-through;"
-                    return ""
+            st.divider()
+            st.subheader("🖨️ Gestion & Duplicata d'un ticket")
+            choix_detail = st.selectbox("Sélectionnez le numéro du ticket :", df_filtre["N°"].tolist())
 
-                df_afficher_hist = df_filtre.drop(columns=["Date_Calc", "Date_Exploitation", "utilisateur_id"], errors='ignore')
-                df_afficher_hist['Date Création'] = df_afficher_hist['Date Création'].apply(fmt_date)
-                df_afficher_hist['Encaissement'] = df_afficher_hist['Encaissement'].apply(fmt_date)
-                df_afficher_hist['Total HT'] = df_afficher_hist['Total HT'].apply(fmt_prix)
-                df_afficher_hist['TVA'] = df_afficher_hist['TVA'].apply(fmt_prix)
-                df_afficher_hist['Total TTC'] = df_afficher_hist['Total TTC'].apply(fmt_prix)
-                df_afficher_hist['Pourboire'] = df_afficher_hist['Pourboire'].apply(fmt_prix)
-                
-                st.dataframe(df_afficher_hist.style.map(color_statut, subset=["Statut"]), use_container_width=True, hide_index=True)
-                
-                col_exp_h1, col_exp_h2 = st.columns(2)
-                date_str_file_hist = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-                
-                col_exp_h1.download_button(
-                    label="📥 Exporter en CSV (Excel)", 
-                    data=convert_df_to_csv(df_afficher_hist), 
-                    file_name=f"Historique_Ventes_{date_str_file_hist}.csv", 
-                    mime="text/csv", 
-                    use_container_width=True
-                )
-                
-                html_report_hist = f"""
-                <html>
-                <head>
-                    <meta charset="utf-8">
-                    <title>Historique des Ventes</title>
-                    <style>
-                        body {{ font-family: sans-serif; margin: 20px; }}
-                        h2 {{ text-align: center; color: #333; }}
-                        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
-                        th, td {{ border: 1px solid #aaa; padding: 8px; text-align: left; font-size: 14px; }}
-                        th {{ background: #eee; font-weight: bold; }}
-                        .summary {{ text-align: center; margin-bottom: 20px; font-size: 1.2em; font-weight: bold; color: #0288d1; }}
-                        @media print {{ button {{ display: none; }} }}
-                    </style>
-                </head>
-                <body>
-                    <h2>Historique des Ventes - Édité le {datetime.datetime.now().strftime(sys_format_date)}</h2>
-                    <div class="summary">CA TTC : {fmt_prix(ca_ttc_tot)} FCFA | CA HT : {fmt_prix(ca_ht_tot)} FCFA | TVA : {fmt_prix(tva_tot)} FCFA | Pourboires : {fmt_prix(pourboires_tot)} FCFA</div>
-                    <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter en PDF / Imprimer</button>
-                    {df_afficher_hist.to_html(index=False)}
-                </body>
-                </html>
-                """
-                
-                col_exp_h2.download_button(
-                    label="🖨️ Imprimer / Exporter en PDF", 
-                    data=html_report_hist, 
-                    file_name=f"Historique_Ventes_{date_str_file_hist}.html", 
-                    mime="text/html", 
-                    use_container_width=True
-                )
+            if choix_detail:
+                ticket_id_int = int(choix_detail)
+                if st.session_state.credit_ticket_id != ticket_id_int:
+                    st.session_state.paiements_credit, st.session_state.pourboire_credit, st.session_state.credit_ticket_id = [], 0.0, ticket_id_int
 
-                st.divider()
-                st.subheader("🖨️ Gestion & Duplicata d'un ticket")
-                choix_detail = st.selectbox("Sélectionnez le numéro du ticket :", df_filtre["N°"].tolist())
+                info_cmd = pd.read_sql_query("SELECT c.type_commande, c.methode_paiement, c.statut, c.nom_client, c.telephone, c.adresse, c.client_id, c.total, c.pourboire, c.date_creation, c.date_paiement, c.frais_livraison, u.nom as nom_serveur, z.nom as nom_zone FROM Commandes c LEFT JOIN Utilisateurs u ON c.utilisateur_id = u.id LEFT JOIN Zones_Livraison z ON c.zone_id = z.id WHERE c.id = ?", conn, params=(ticket_id_int,)).iloc[0]
+                df_paiement = pd.read_sql_query("SELECT nom FROM Methodes_Paiement ORDER BY nom", conn)
+                options_paiement_admin = df_paiement["nom"].tolist()
 
-                if choix_detail:
-                    ticket_id_int = int(choix_detail)
-                    if st.session_state.credit_ticket_id != ticket_id_int:
-                        st.session_state.paiements_credit, st.session_state.pourboire_credit, st.session_state.credit_ticket_id = [], 0.0, ticket_id_int
-
-                    info_cmd = pd.read_sql_query("SELECT c.type_commande, c.methode_paiement, c.statut, c.nom_client, c.telephone, c.adresse, c.client_id, c.total, c.pourboire, c.date_creation, c.date_paiement, c.frais_livraison, t.numero_table, ch.numero_chambre, u.nom as nom_serveur, z.nom as nom_zone FROM Commandes c LEFT JOIN Tables_Resto t ON c.table_id = t.id LEFT JOIN Chambres_Hotel ch ON c.chambre_id = ch.id LEFT JOIN Utilisateurs u ON c.utilisateur_id = u.id LEFT JOIN Zones_Livraison z ON c.zone_id = z.id WHERE c.id = ?", conn, params=(ticket_id_int,)).iloc[0]
-                    df_paiement = pd.read_sql_query("SELECT nom FROM Methodes_Paiement ORDER BY nom", conn)
-                    options_paiement_admin = df_paiement["nom"].tolist()
-
-                    if info_cmd["statut"] in ["À Crédit", "Note de Chambre"]:
-                        st.warning("⚠️ Ce ticket est en attente de paiement (À Crédit / Note de Chambre).")
-                        
-                        df_deja_paye = pd.read_sql_query("SELECT montant FROM Paiements_Ticket WHERE commande_id=? AND methode NOT LIKE '%(Réglé)' AND methode NOT IN ('À Crédit', 'Note de Chambre')", conn, params=(ticket_id_int,))
-                        deja_paye_db = df_deja_paye['montant'].sum() if not df_deja_paye.empty else 0.0
-                        
-                        total_a_regler = float(info_cmd['total']) - deja_paye_db
-                        reste_c = total_a_regler
-                        pourboire_calc_c = 0.0
-                        
-                        for p in st.session_state.paiements_credit:
-                            if p["methode"] != "Espèces":
-                                if p["montant"] > reste_c: pourboire_calc_c += (p["montant"] - reste_c); reste_c = 0.0
-                                else: reste_c -= p["montant"]
+                if info_cmd["statut"] in ["À Crédit"]:
+                    st.warning("⚠️ Ce ticket est en attente de paiement (À Crédit).")
+                    
+                    df_deja_paye = pd.read_sql_query("SELECT montant FROM Paiements_Ticket WHERE commande_id=? AND methode NOT LIKE '%(Réglé)' AND methode NOT IN ('À Crédit')", conn, params=(ticket_id_int,))
+                    deja_paye_db = df_deja_paye['montant'].sum() if not df_deja_paye.empty else 0.0
+                    
+                    total_a_regler = float(info_cmd['total']) - deja_paye_db
+                    reste_c = total_a_regler
+                    pourboire_calc_c = 0.0
+                    
+                    for p in st.session_state.paiements_credit:
+                        if p["methode"] != "Espèces":
+                            if p["montant"] > reste_c: pourboire_calc_c += (p["montant"] - reste_c); reste_c = 0.0
                             else: reste_c -= p["montant"]
-                                
-                        if reste_c < 0: rendu_c = abs(reste_c); reste_a_payer_c = 0.0
-                        else: reste_a_payer_c = reste_c; rendu_c = 0.0
-                    
-                        total_paye_c = sum(p["montant"] for p in st.session_state.paiements_credit)
-                
-                        st.markdown(f"<div style='text-align: left; margin-top: 10px; font-size: 1.1em;'><b>TOTAL RESTANT DÛ : {fmt_prix(total_a_regler)} FCFA</b></div>", unsafe_allow_html=True)
-                        
-                        with st.container():
-                            c_pc1, c_pc2, c_pc3, c_pc4, c_pc5 = st.columns([2, 1.5, 1.5, 1, 1.5])
-                            mode_choisi_c = c_pc1.selectbox("Régler le crédit par :", [p for p in options_paiement_admin if p not in ["À Crédit", "Note de Chambre"]], key="mode_cred")
-                            montant_c = c_pc2.number_input("Montant donné", min_value=0.0, value=float(reste_a_payer_c), step=1000.0, key="mnt_cred")
-                            date_default = datetime.datetime.now()
-                            d_date_c = c_pc3.date_input("Date d'encaissement", value=date_default.date(), key="d_cred")
-                            d_time_c = c_pc4.time_input("Heure", value=date_default.time(), key="t_cred")
+                        else: reste_c -= p["montant"]
                             
-                            c_pc5.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-                            if c_pc5.button("➕ Ajouter", use_container_width=True, key="btn_add_cred"):
-                                if montant_c > 0:
-                                    date_paie_temp = datetime.datetime.combine(d_date_c, d_time_c).strftime("%Y-%m-%d %H:%M:%S")
-                                    st.session_state.paiements_credit.append({"methode": mode_choisi_c, "montant": montant_c, "date": date_paie_temp})
-                                    st.rerun()
-                                    
-                        if st.session_state.paiements_credit:
-                            st.markdown("<hr style='margin: 10px 0px;'>", unsafe_allow_html=True)
-                            for i, p in enumerate(st.session_state.paiements_credit):
-                                cl1, cl2, cl3, cl4 = st.columns([2, 2, 2, 0.5])
-                                cl1.write(f"✔️ {p['methode']}")
-                                cl2.write(f"{fmt_prix(p['montant'])} F")
-                                cl3.write(f"{fmt_date(p['date'])}")
-                                if cl4.button("❌", key=f"del_pc_{i}"): st.session_state.paiements_credit.pop(i); st.rerun()
+                    if reste_c < 0: rendu_c = abs(reste_c); reste_a_payer_c = 0.0
+                    else: reste_a_payer_c = reste_c; rendu_c = 0.0
                 
-                        if rendu_c > 0: st.success(f"🔄 **MONNAIE À RENDRE : {fmt_prix(rendu_c)} FCFA**")
-                        elif reste_a_payer_c > 0: st.warning(f"⚠️ **Reste à payer : {fmt_prix(reste_a_payer_c)} FCFA**")
-                        elif reste_a_payer_c == 0 and total_paye_c > 0:
-                            if pourboire_calc_c > 0: st.info(f"✅ Compte bon ! (🎁 Pourboire auto. : {fmt_prix(pourboire_calc_c)} F)")
-                            else: st.info("✅ Le compte est bon !")
-                                
-                        if reste_a_payer_c == 0 and total_paye_c > 0:
-                            if st.button("✅ Valider l'encaissement définitif", type="primary", use_container_width=True):
-                                cursor = conn.cursor()
-                                methode_principale = "Multiple" if len(st.session_state.paiements_credit) > 1 else st.session_state.paiements_credit[0]["methode"]
-                                date_paie_finale = st.session_state.paiements_credit[-1]["date"]
-                                nouveau_pourb = float(info_cmd.get('pourboire', 0.0)) + pourboire_calc_c
-                                
-                                cursor.execute("UPDATE Commandes SET statut='Payée', methode_paiement=?, date_paiement=?, pourboire=? WHERE id=?", (methode_principale, date_paie_finale, nouveau_pourb, ticket_id_int))
-                                
-                                rendu_restant = rendu_c
-                                montants_finaux = [dict(pt) for pt in st.session_state.paiements_credit]
-                                if rendu_restant > 0:
-                                    for pt in montants_finaux:
-                                        if pt["methode"] == "Espèces" and pt["montant"] >= rendu_restant:
-                                            pt["montant"] -= rendu_restant; rendu_restant = 0; break
-                                            
-                                cursor.execute("UPDATE Paiements_Ticket SET methode = methode || ' (Réglé)' WHERE commande_id=? AND methode IN ('À Crédit', 'Note de Chambre')", (ticket_id_int,))
-                                for p_f in montants_finaux: cursor.execute("INSERT INTO Paiements_Ticket (commande_id, methode, montant, date_paiement) VALUES (?, ?, ?, ?)", (ticket_id_int, p_f["methode"], p_f["montant"], p_f["date"]))
-                                
-                                conn.commit()
-                                st.session_state.paiements_credit = []
-                                st.success("Crédit réglé avec succès !")
+                    total_paye_c = sum(p["montant"] for p in st.session_state.paiements_credit)
+            
+                    st.markdown(f"<div style='text-align: left; margin-top: 10px; font-size: 1.1em;'><b>TOTAL RESTANT DÛ : {fmt_prix(total_a_regler)} FCFA</b></div>", unsafe_allow_html=True)
+                    
+                    with st.container():
+                        c_pc1, c_pc2, c_pc3, c_pc4, c_pc5 = st.columns([2, 1.5, 1.5, 1, 1.5])
+                        mode_choisi_c = c_pc1.selectbox("Régler le crédit par :", [p for p in options_paiement_admin if p not in ["À Crédit"]], key="mode_cred")
+                        montant_c = c_pc2.number_input("Montant donné", min_value=0.0, value=float(reste_a_payer_c), step=1000.0, key="mnt_cred")
+                        date_default = datetime.datetime.now()
+                        d_date_c = c_pc3.date_input("Date d'encaissement", value=date_default.date(), key="d_cred")
+                        d_time_c = c_pc4.time_input("Heure", value=date_default.time(), key="t_cred")
+                        
+                        c_pc5.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                        if c_pc5.button("➕ Ajouter", use_container_width=True, key="btn_add_cred"):
+                            if montant_c > 0:
+                                date_paie_temp = datetime.datetime.combine(d_date_c, d_time_c).strftime("%Y-%m-%d %H:%M:%S")
+                                st.session_state.paiements_credit.append({"methode": mode_choisi_c, "montant": montant_c, "date": date_paie_temp})
                                 st.rerun()
-                        else: 
-                            st.button("✅ Valider l'encaissement (Solde incomplet)", disabled=True, use_container_width=True)
-
-                    elif info_cmd["statut"] == "Payée" and role_actif == "Manager":
-                        with st.expander("🛠️ Modifier le paiement ou Supprimer ce ticket (Admin)"):
-                            idx_actuel = options_paiement_admin.index(info_cmd["methode_paiement"]) if info_cmd["methode_paiement"] in options_paiement_admin else 0
-                            nouveau_mode = st.selectbox("Nouveau mode :", options_paiement_admin, index=idx_actuel)
-                            col_btn_m1, col_btn_m2 = st.columns(2)
-                            if col_btn_m1.button("Mettre à jour"):
-                                cursor = conn.cursor()
-                                cursor.execute("UPDATE Commandes SET methode_paiement=? WHERE id=?", (nouveau_mode, ticket_id_int))
-                                cursor.execute("UPDATE Paiements_Ticket SET methode=? WHERE commande_id=? AND methode NOT LIKE '%(Réglé)' AND methode NOT IN ('À Crédit', 'Note de Chambre')", (nouveau_mode, ticket_id_int))
-                                conn.commit(); st.success("Modifié !"); st.rerun()
-                            if col_btn_m2.button("❌ Annuler et Supprimer ce ticket"):
-                                cursor = conn.cursor()
-                                ref_ticket = f"Vente - Ticket #{ticket_id_int}"
                                 
-                                cursor.execute("SELECT produit_id, depot_id, quantite FROM Mouvements_Stock WHERE reference = ?", (ref_ticket,))
-                                for mvt in cursor.fetchall(): 
-                                    pid, did, qte_vendue = mvt
-                                    cursor.execute("SELECT composition_id, composition_qte FROM Produits WHERE id = ?", (pid,))
-                                    comp_res = cursor.fetchone()
-                                    base_id = pid
-                                    qte_stock_restaure = qte_vendue
-                                    if comp_res and comp_res[0]:
-                                        base_id = comp_res[0]
-                                        qte_stock_restaure = qte_vendue * float(comp_res[1])
-                                    cursor.execute("UPDATE Stock_Articles SET quantite = quantite + ? WHERE produit_id = ? AND depot_id = ?", (qte_stock_restaure, base_id, did))
-                                    
-                                cursor.execute("DELETE FROM Mouvements_Stock WHERE reference = ?", (ref_ticket,))
-                                cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (ticket_id_int,))
-                                cursor.execute("DELETE FROM Paiements_Ticket WHERE commande_id = ?", (ticket_id_int,))
-                                cursor.execute("DELETE FROM Commandes WHERE id = ?", (ticket_id_int,))
-                                conn.commit(); st.success("Ticket supprimé et stock réajusté !"); st.rerun()
-
-                    st.write("")
-                    
-                    df_lignes_detail = pd.read_sql_query("SELECT p.nom, lc.quantite, lc.prix_unitaire, lc.sous_total, p.applique_tva, c.tva as tva_rate FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id JOIN Categories c ON p.categorie_id = c.id WHERE lc.commande_id = ?", conn, params=(ticket_id_int,))
-                    df_paiements_detail = pd.read_sql_query("SELECT methode, montant FROM Paiements_Ticket WHERE commande_id=? AND methode NOT LIKE '%(Réglé)' AND methode NOT IN ('À Crédit', 'Note de Chambre')", conn, params=(ticket_id_int,))
-                    params = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
-                    p_nom_r = params["nom"] if params["nom"] else "VOTRE ÉTABLISSEMENT"
-
-                    ticket_str = f"=== {p_nom_r.upper()} ==="[:42].center(42) + "\n"
-                    if params["adresse"]:
-                        for ligne_adr_r in textwrap.wrap(params["adresse"], width=42): ticket_str += f"{ligne_adr_r.center(42)}\n"
-                    if params["telephone"]: ticket_str += f"Tel: {params['telephone']}".center(42) + "\n"
-                    if params["ninea"]: ticket_str += f"NINEA: {params['ninea']}".center(42) + "\n"
-                    ticket_str += "-" * 42 + "\n"
-                    ticket_str += f"{('DUPLICATA TICKET #'+str(ticket_id_int)):^42}\n"
-                    if info_cmd["nom_serveur"]: ticket_str += f"Caissier: {info_cmd['nom_serveur']}\n"
-                    ticket_str += f"Date: {fmt_date(info_cmd['date_creation'])}\n"
-                    ticket_str += f"Type: {info_cmd['type_commande']} | {info_cmd['methode_paiement']}\n"
-                    if info_cmd["statut"] == "Payée" and not pd.isna(info_cmd["date_paiement"]) and info_cmd["date_paiement"] != info_cmd["date_creation"]:
-                        ticket_str += f"Payé le: {fmt_date(info_cmd['date_paiement'])}\n"
-                    if not pd.isna(info_cmd["numero_table"]): ticket_str += f"Table: {info_cmd['numero_table']}\n"
-                    if not pd.isna(info_cmd["numero_chambre"]): ticket_str += f"Chambre: {info_cmd['numero_chambre']}\n"
-                    if not pd.isna(info_cmd["client_id"]): ticket_str += f"Code Client: CLI-{int(info_cmd['client_id']):04d}\n"
-                    if info_cmd["nom_client"]: ticket_str += f"Client: {info_cmd['nom_client']}\n"
-                    if info_cmd["telephone"]: ticket_str += f"Tel: {info_cmd['telephone']}\n"
-                    if info_cmd["type_commande"] == "Livraison":
-                        if info_cmd["nom_zone"]: ticket_str += f"Zone: {info_cmd['nom_zone']}\n"
-                        if info_cmd.get("adresse"): 
-                            for ligne_adr in textwrap.wrap(f"Adresse: {info_cmd['adresse']}", width=42): ticket_str += f"{ligne_adr}\n"
-                    ticket_str += "-" * 42 + "\n"
-
-                    tva_totale_hist = 0.0
-                    for _, row in df_lignes_detail.iterrows(): 
-                        nom_plat = row["nom"]
-                        if row["quantite"] > 0 and row["applique_tva"] == 1 and row["tva_rate"] > 0:
-                            tva_totale_hist += row["sous_total"] - (row["sous_total"] / (1 + row["tva_rate"] / 100))
+                    if st.session_state.paiements_credit:
+                        st.markdown("<hr style='margin: 10px 0px;'>", unsafe_allow_html=True)
+                        for i, p in enumerate(st.session_state.paiements_credit):
+                            cl1, cl2, cl3, cl4 = st.columns([2, 2, 2, 0.5])
+                            cl1.write(f"✔️ {p['methode']}")
+                            cl2.write(f"{fmt_prix(p['montant'])} F")
+                            cl3.write(f"{fmt_date(p['date'])}")
+                            if cl4.button("❌", key=f"del_pc_{i}"): st.session_state.paiements_credit.pop(i); st.rerun()
+            
+                    if rendu_c > 0: st.success(f"🔄 **MONNAIE À RENDRE : {fmt_prix(rendu_c)} FCFA**")
+                    elif reste_a_payer_c > 0: st.warning(f"⚠️ **Reste à payer : {fmt_prix(reste_a_payer_c)} FCFA**")
+                    elif reste_a_payer_c == 0 and total_paye_c > 0:
+                        if pourboire_calc_c > 0: st.info(f"✅ Compte bon ! (🎁 Pourboire auto. : {fmt_prix(pourboire_calc_c)} F)")
+                        else: st.info("✅ Le compte est bon !")
                             
-                        if row["prix_unitaire"] == 0 and row["quantite"] > 0: qte_str = f"{fmt_qte(row['quantite'])}x {nom_plat} (Offert)"
-                        elif row["quantite"] < 0: qte_str = f"{fmt_qte(row['quantite'])}x {nom_plat} (Annul.)"
-                        else: qte_str = f"{fmt_qte(row['quantite'])}x {nom_plat}"
+                    if reste_a_payer_c == 0 and total_paye_c > 0:
+                        if st.button("✅ Valider l'encaissement définitif", type="primary", use_container_width=True):
+                            cursor = conn.cursor()
+                            methode_principale = "Multiple" if len(st.session_state.paiements_credit) > 1 else st.session_state.paiements_credit[0]["methode"]
+                            date_paie_finale = st.session_state.paiements_credit[-1]["date"]
+                            nouveau_pourb = float(info_cmd.get('pourboire', 0.0)) + pourboire_calc_c
+                            
+                            cursor.execute("UPDATE Commandes SET statut='Payée', methode_paiement=?, date_paiement=?, pourboire=? WHERE id=?", (methode_principale, date_paie_finale, nouveau_pourb, ticket_id_int))
+                            
+                            rendu_restant = rendu_c
+                            montants_finaux = [dict(pt) for pt in st.session_state.paiements_credit]
+                            if rendu_restant > 0:
+                                for pt in montants_finaux:
+                                    if pt["methode"] == "Espèces" and pt["montant"] >= rendu_restant:
+                                        pt["montant"] -= rendu_restant; rendu_restant = 0; break
+                                        
+                            cursor.execute("UPDATE Paiements_Ticket SET methode = methode || ' (Réglé)' WHERE commande_id=? AND methode IN ('À Crédit')", (ticket_id_int,))
+                            for p_f in montants_finaux: cursor.execute("INSERT INTO Paiements_Ticket (commande_id, methode, montant, date_paiement) VALUES (?, ?, ?, ?)", (ticket_id_int, p_f["methode"], p_f["montant"], p_f["date"]))
+                            
+                            conn.commit()
+                            st.session_state.paiements_credit = []
+                            st.success("Crédit réglé avec succès !")
+                            st.rerun()
+                    else: 
+                        st.button("✅ Valider l'encaissement (Solde incomplet)", disabled=True, use_container_width=True)
+
+                elif info_cmd["statut"] in ["Payée", "En attente"] and role_actif == "Manager":
+                    with st.expander("🛠️ Modifier le paiement ou Annuler ce ticket (Admin)"):
+                        idx_actuel = options_paiement_admin.index(info_cmd["methode_paiement"]) if info_cmd["methode_paiement"] in options_paiement_admin else 0
+                        nouveau_mode = st.selectbox("Nouveau mode :", options_paiement_admin, index=idx_actuel)
+                        col_btn_m1, col_btn_m2 = st.columns(2)
+                        if col_btn_m1.button("Mettre à jour"):
+                            cursor = conn.cursor()
+                            cursor.execute("UPDATE Commandes SET methode_paiement=? WHERE id=?", (nouveau_mode, ticket_id_int))
+                            cursor.execute("UPDATE Paiements_Ticket SET methode=? WHERE commande_id=? AND methode NOT LIKE '%(Réglé)' AND methode NOT IN ('À Crédit')", (nouveau_mode, ticket_id_int))
+                            conn.commit(); st.success("Modifié !"); st.rerun()
+                        if col_btn_m2.button("🚫 Annuler ce ticket"):
+                            cursor = conn.cursor()
+                            ref_ticket = f"Vente - Ticket #{ticket_id_int}"
+                            
+                            cursor.execute("SELECT produit_id, depot_id, quantite FROM Mouvements_Stock WHERE reference = ?", (ref_ticket,))
+                            for mvt in cursor.fetchall(): 
+                                pid, did, qte_vendue = mvt
+                                cursor.execute("SELECT composition_id, composition_qte FROM Produits WHERE id = ?", (pid,))
+                                comp_res = cursor.fetchone()
+                                base_id = pid
+                                qte_stock_restaure = qte_vendue
+                                if comp_res and comp_res[0]:
+                                    base_id = comp_res[0]
+                                    qte_stock_restaure = qte_vendue * float(comp_res[1])
+                                cursor.execute("UPDATE Stock_Plats SET quantite = quantite + ? WHERE produit_id = ? AND depot_id = ?", (qte_stock_restaure, base_id, did))
+                                cursor.execute("UPDATE Mouvements_Stock SET type_mouvement = 'Annulation Vente' WHERE reference = ?", (ref_ticket,))
+                                
+                            cursor.execute("UPDATE Commandes SET statut = 'Annulée' WHERE id = ?", (ticket_id_int,))
+                            cursor.execute("DELETE FROM Paiements_Ticket WHERE commande_id = ?", (ticket_id_int,))
+                            conn.commit(); st.success("Ticket annulé et stock réajusté !"); st.rerun()
+
+                st.write("")
+                
+                df_lignes_detail = pd.read_sql_query("SELECT p.nom, lc.quantite, lc.prix_unitaire, lc.sous_total, p.applique_tva, c.tva as tva_rate FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id JOIN Categories c ON p.categorie_id = c.id WHERE lc.commande_id = ?", conn, params=(ticket_id_int,))
+                df_paiements_detail = pd.read_sql_query("SELECT methode, montant FROM Paiements_Ticket WHERE commande_id=? AND methode NOT LIKE '%(Réglé)' AND methode NOT IN ('À Crédit')", conn, params=(ticket_id_int,))
+                params = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
+                p_nom_r = params["nom"] if params["nom"] else "VOTRE COMMERCE"
+
+                ticket_str = f"=== {p_nom_r.upper()} ==="[:42].center(42) + "\n"
+                if params["adresse"]:
+                    for ligne_adr_r in textwrap.wrap(params["adresse"], width=42): ticket_str += f"{ligne_adr_r.center(42)}\n"
+                if params["telephone"]: ticket_str += f"Tel: {params['telephone']}".center(42) + "\n"
+                if params["ninea"]: ticket_str += f"NINEA: {params['ninea']}".center(42) + "\n"
+                ticket_str += "-" * 42 + "\n"
+                ticket_str += f"{('DUPLICATA TICKET #'+str(ticket_id_int)):^42}\n"
+                if info_cmd["nom_serveur"]: ticket_str += f"Caissier: {info_cmd['nom_serveur']}\n"
+                ticket_str += f"Date: {fmt_date(info_cmd['date_creation'])}\n"
+                ticket_str += f"Type: {info_cmd['type_commande']} | {info_cmd['methode_paiement']}\n"
+                if info_cmd["statut"] == "Payée" and not pd.isna(info_cmd["date_paiement"]) and info_cmd["date_paiement"] != info_cmd["date_creation"]:
+                    ticket_str += f"Payé le: {fmt_date(info_cmd['date_paiement'])}\n"
+                if not pd.isna(info_cmd["client_id"]): ticket_str += f"Code Client: CLI-{int(info_cmd['client_id']):04d}\n"
+                if info_cmd["nom_client"]: ticket_str += f"Client: {info_cmd['nom_client']}\n"
+                if info_cmd["telephone"]: ticket_str += f"Tel: {info_cmd['telephone']}\n"
+                if info_cmd["type_commande"] == "Livraison":
+                    if info_cmd["nom_zone"]: ticket_str += f"Zone: {info_cmd['nom_zone']}\n"
+                    if info_cmd.get("adresse"): 
+                        for ligne_adr in textwrap.wrap(f"Adresse: {info_cmd['adresse']}", width=42): ticket_str += f"{ligne_adr}\n"
+                ticket_str += "-" * 42 + "\n"
+
+                tva_totale_hist = 0.0
+                for _, row in df_lignes_detail.iterrows(): 
+                    nom_plat = row["nom"]
+                    if row["quantite"] > 0 and row["applique_tva"] == 1 and row["tva_rate"] > 0:
+                        tva_totale_hist += row["sous_total"] - (row["sous_total"] / (1 + row["tva_rate"] / 100))
                         
-                        ticket_str += f"{qte_str}\n"
-                        p_u_str = f"{fmt_prix(row['prix_unitaire'])} F"
-                        s_t_str = f"{fmt_prix(row['sous_total'])} F"
-                        ticket_str += f"{p_u_str:>20}{s_t_str:>22}\n"
+                    if row["prix_unitaire"] == 0 and row["quantite"] > 0: qte_str = f"{fmt_qte(row['quantite'])}x {nom_plat} (Offert)"
+                    elif row["quantite"] < 0: qte_str = f"{fmt_qte(row['quantite'])}x {nom_plat} (Annul.)"
+                    else: qte_str = f"{fmt_qte(row['quantite'])}x {nom_plat}"
+                    
+                    ticket_str += f"{qte_str}\n"
+                    p_u_str = f"{fmt_prix(row['prix_unitaire'])} F"
+                    s_t_str = f"{fmt_prix(row['sous_total'])} F"
+                    ticket_str += f"{p_u_str:>20}{s_t_str:>22}\n"
 
-                    ticket_str += "-" * 42 + "\n"
-                    
-                    frais_liv = float(info_cmd['frais_livraison']) if info_cmd['frais_livraison'] else 0.0
-                    total_cmd = float(info_cmd['total'])
-                    
-                    if info_cmd['type_commande'] == "Livraison" and frais_liv > 0:
-                        total_produits = total_cmd - frais_liv
-                        ticket_str += f"TOTAL : {fmt_prix(total_produits)} FCFA".rjust(42) + "\n"
-                        if tva_totale_hist > 0: ticket_str += f"Dont TVA : {fmt_prix(tva_totale_hist)} FCFA".rjust(42) + "\n"
-                        ticket_str += f"FRAIS DE LIVRAISON : {fmt_prix(frais_liv)} FCFA".rjust(42) + "\n"
-                        ticket_str += f"TOTAL : {fmt_prix(total_cmd)} FCFA".rjust(42) + "\n"
-                    else:
-                        ticket_str += f"TOTAL : {fmt_prix(total_cmd)} FCFA".rjust(42) + "\n"
-                        if tva_totale_hist > 0: ticket_str += f"Dont TVA : {fmt_prix(tva_totale_hist)} FCFA".rjust(42) + "\n"
+                ticket_str += "-" * 42 + "\n"
+                
+                frais_liv = float(info_cmd['frais_livraison']) if info_cmd['frais_livraison'] else 0.0
+                total_cmd = float(info_cmd['total'])
+                
+                if info_cmd['type_commande'] == "Livraison" and frais_liv > 0:
+                    total_produits = total_cmd - frais_liv
+                    ticket_str += f"TOTAL : {fmt_prix(total_produits)} FCFA".rjust(42) + "\n"
+                    if tva_totale_hist > 0: ticket_str += f"Dont TVA : {fmt_prix(tva_totale_hist)} FCFA".rjust(42) + "\n"
+                    ticket_str += f"FRAIS DE LIVRAISON : {fmt_prix(frais_liv)} FCFA".rjust(42) + "\n"
+                    ticket_str += f"TOTAL : {fmt_prix(total_cmd)} FCFA".rjust(42) + "\n"
+                else:
+                    ticket_str += f"TOTAL : {fmt_prix(total_cmd)} FCFA".rjust(42) + "\n"
+                    if tva_totale_hist > 0: ticket_str += f"Dont TVA : {fmt_prix(tva_totale_hist)} FCFA".rjust(42) + "\n"
 
-                    ticket_str += "-" * 42 + "\n"
-                    
-                    rendu_monnaie_historique = 0.0
-                    if not df_paiements_detail.empty:
-                        total_paye_hist = df_paiements_detail['montant'].sum()
-                        pourb = float(info_cmd.get('pourboire', 0.0)) if not pd.isna(info_cmd.get('pourboire')) else 0.0
-                        rendu_monnaie_historique = max(0.0, total_paye_hist - total_cmd - pourb)
-                        for _, p_row in df_paiements_detail.iterrows(): ticket_str += f"Reçu en {p_row['methode']} : {fmt_prix(p_row['montant'])} FCFA".rjust(42) + "\n"
-                            
-                    if rendu_monnaie_historique > 0: ticket_str += f"MONNAIE RENDUE : {fmt_prix(rendu_monnaie_historique)} FCFA".rjust(42) + "\n"
+                ticket_str += "-" * 42 + "\n"
+                
+                rendu_monnaie_historique = 0.0
+                if not df_paiements_detail.empty:
+                    total_paye_hist = df_paiements_detail['montant'].sum()
+                    pourb = float(info_cmd.get('pourboire', 0.0)) if not pd.isna(info_cmd.get('pourboire')) else 0.0
+                    rendu_monnaie_historique = max(0.0, total_paye_hist - total_cmd - pourb)
+                    for _, p_row in df_paiements_detail.iterrows(): ticket_str += f"Reçu en {p_row['methode']} : {fmt_prix(p_row['montant'])} FCFA".rjust(42) + "\n"
+                        
+                if rendu_monnaie_historique > 0: ticket_str += f"MONNAIE RENDUE : {fmt_prix(rendu_monnaie_historique)} FCFA".rjust(42) + "\n"
 
-                    ticket_str += "\n"
-                    ticket_str += f"{'=== MERCI DE VOTRE VISITE ===':^42}\n"
-                    
-                    if info_cmd['type_commande'] == "Room Service" or info_cmd['statut'] == "À Crédit" or info_cmd['methode_paiement'] in ["À Crédit", "Note de Chambre"]:
-                        ticket_str += "\n" + f"{'(Signature)':>42}\n\n"
-                    else:
-                        ticket_str += "\n\n\n"
+                ticket_str += "\n"
+                ticket_str += f"{'=== MERCI DE VOTRE VISITE ===':^42}\n"
+                
+                if info_cmd['statut'] == "À Crédit" or info_cmd['methode_paiement'] in ["À Crédit"]:
+                    ticket_str += "\n" + f"{'(Signature)':>42}\n\n"
+                else:
+                    ticket_str += "\n\n\n"
 
-                    col_vue, col_print = st.columns([1, 1])
-                    col_vue.code(ticket_str, language="text")
-                    
-                    file_date_str_dup = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-                    nom_exp_dup = f"Duplicata_Ticket_{ticket_id_int}_{file_date_str_dup}.txt"
-                    
-                    if hasattr(os, 'startfile'):
-                        if col_print.button("🖨️ Envoyer à l'imprimante (Windows)"):
-                            if imprimer_ticket_windows(ticket_str, nom_fichier_export=nom_exp_dup, sous_dossier="tickets"): st.success("Impression lancée !")
-                            else: st.error("Erreur d'impression.")
-                    else:
-                        col_print.download_button(label="🖨️ Télécharger le Ticket (Pour impression Tablette)", data=ticket_str.encode('utf-8-sig'), file_name=nom_exp_dup, mime="text/plain", type="primary", use_container_width=True)
+                col_vue, col_print = st.columns([1, 1])
+                col_vue.code(ticket_str, language="text")
+                
+                file_date_str_dup = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+                nom_exp_dup = f"Duplicata_Ticket_{ticket_id_int}_{file_date_str_dup}.txt"
+                
+                if hasattr(os, 'startfile'):
+                    if col_print.button("🖨️ Envoyer à l'imprimante (Windows)"):
+                        if imprimer_ticket_windows(ticket_str, nom_fichier_export=nom_exp_dup, sous_dossier="tickets"): st.success("Impression lancée !")
+                        else: st.error("Erreur d'impression.")
+                else:
+                    col_print.download_button(label="🖨️ Télécharger le Ticket (Pour impression Tablette)", data=ticket_str.encode('utf-8-sig'), file_name=nom_exp_dup, mime="text/plain", type="primary", use_container_width=True)
 
 conn.close()
