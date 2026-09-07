@@ -77,6 +77,7 @@ def force_db_update():
 
     cursor.execute("PRAGMA table_info(Parametres_Restaurant)")
     colonnes_param = [col[1] for col in cursor.fetchall()]
+    if "monnaie" not in colonnes_param: cursor.execute("ALTER TABLE Parametres_Restaurant ADD COLUMN monnaie TEXT DEFAULT 'FCFA'")
     if "heure_fin_service" not in colonnes_param: cursor.execute("ALTER TABLE Parametres_Restaurant ADD COLUMN heure_fin_service INTEGER DEFAULT 5")
     if "format_date" not in colonnes_param: cursor.execute("ALTER TABLE Parametres_Restaurant ADD COLUMN format_date TEXT DEFAULT '%Y-%m-%d %H:%M'")
     if "format_qte" not in colonnes_param: cursor.execute("ALTER TABLE Parametres_Restaurant ADD COLUMN format_qte TEXT DEFAULT '0'")
@@ -136,8 +137,9 @@ if not df_params_global.empty:
     sys_format_prix = str(df_params_global.iloc[0].get('format_prix', ','))
     sys_decimal_prix = str(df_params_global.iloc[0].get('decimal_prix', '0'))
     sys_heure_fin = int(df_params_global.iloc[0].get('heure_fin_service', 5))
+    sys_monnaie = str(df_params_global.iloc[0].get('monnaie', 'FCFA')) # NOUVEAU
 else:
-    sys_format_date, sys_format_qte, sys_format_prix, sys_decimal_prix, sys_heure_fin = '%Y-%m-%d %H:%M', '0', ',', '0', 5
+    sys_format_date, sys_format_qte, sys_format_prix, sys_decimal_prix, sys_heure_fin, sys_monnaie = '%Y-%m-%d %H:%M', '0', ',', '0', 5, 'FCFA'
 
 def fmt_prix(val):
     if pd.isna(val): val = 0.0
@@ -365,16 +367,14 @@ elif menu == "Mouvements Caisse":
             st.info("Aucun mouvement dans l'historique.")
 
 elif menu == "Tableau de Bord":
-    st.markdown("### 📊 Z de Caisse & Tableau de Bord")
+    st.markdown("### 📊 Tableau de Bord & Analyses")
     
-    # --- NOUVEAU : Sélecteur de période (Date début - Date fin) ---
+    # --- Sélecteur global pour tout le tableau de bord ---
     col_date, _ = st.columns([2, 2])
     date_defaut = (datetime.datetime.now() - datetime.timedelta(hours=sys_heure_fin)).date()
-    
-    dates_selectionnees = col_date.date_input("📅 Choisir la période d'exploitation :", value=[date_defaut, date_defaut])
+    dates_selectionnees = col_date.date_input("📅 Choisir la période d'analyse :", value=[date_defaut, date_defaut])
     st.divider()
     
-    # Gestion des cas où l'utilisateur n'a cliqué que sur une seule date
     if len(dates_selectionnees) == 2:
         date_debut, date_fin = dates_selectionnees
     elif len(dates_selectionnees) == 1:
@@ -382,7 +382,6 @@ elif menu == "Tableau de Bord":
     else:
         date_debut = date_fin = date_defaut
         
-    # Variables de formatage des textes selon si c'est un seul jour ou une période
     if date_debut == date_fin:
         titre_periode = date_debut.strftime('%d/%m/%Y')
         fichier_periode = date_debut.strftime('%Y-%m-%d')
@@ -391,212 +390,286 @@ elif menu == "Tableau de Bord":
         titre_periode = f"du {date_debut.strftime('%d/%m/%Y')} au {date_fin.strftime('%d/%m/%Y')}"
         fichier_periode = f"{date_debut.strftime('%Y%m%d')}_au_{date_fin.strftime('%Y%m%d')}"
         lbl_periode = "(Période)"
-    # ---------------------------------------------------------------
-    
-    df_mvt = pd.read_sql_query("SELECT type_mouvement, montant, date_mvt FROM Mouvements_Caisse", conn)
-    if not df_mvt.empty:
-        df_mvt['Date_Exploitation'] = (pd.to_datetime(df_mvt['date_mvt']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
-        df_mvt_today = df_mvt[(df_mvt['Date_Exploitation'] >= date_debut) & (df_mvt['Date_Exploitation'] <= date_fin)]
-        fond_caisse = df_mvt_today[df_mvt_today['type_mouvement'] == 'Fond de Caisse']['montant'].sum()
-        entrees_mvt = df_mvt_today[df_mvt_today['type_mouvement'] == 'Entrée']['montant'].sum()
-        sorties_mvt = df_mvt_today[df_mvt_today['type_mouvement'] == 'Sortie']['montant'].sum()
-    else:
-        fond_caisse, entrees_mvt, sorties_mvt = 0.0, 0.0, 0.0
         
-    df_paies = pd.read_sql_query("""
-        SELECT p.montant, p.methode, p.date_paiement, c.date_creation 
-        FROM Paiements_Ticket p JOIN Commandes c ON p.commande_id = c.id
-        WHERE p.methode NOT IN ('À Crédit', 'Note de Chambre') AND c.statut != 'Annulée'
-    """, conn)
+    # --- Création des 3 onglets ---
+    tab_z, tab_depenses, tab_stats = st.tabs(["📑 Rapport Z de Caisse", "💸 Dépenses & Tiroir-Caisse", "📈 Statistiques & Palmarès"])
     
-    df_cmd = pd.read_sql_query("SELECT id, total, pourboire, date_creation, statut FROM Commandes WHERE statut IN ('Payée', 'À Crédit')", conn)
-    
-    ventes_especes_jour = 0.0
-    reglements_anciens_especes = 0.0
-    autres_paies_jour = 0.0
-    paies_tickets_du_jour_total = 0.0
-    html_autres_paies = ""
-    
-    if not df_paies.empty:
-        df_paies['Date_Paie'] = (pd.to_datetime(df_paies['date_paiement']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
-        df_paies['Date_Cmd'] = (pd.to_datetime(df_paies['date_creation']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
-        paies_today = df_paies[(df_paies['Date_Paie'] >= date_debut) & (df_paies['Date_Paie'] <= date_fin)]
-        
-        especes_mask = paies_today['methode'].str.contains('Espèces', case=False, na=False)
-        cmd_in_period_mask = (paies_today['Date_Cmd'] >= date_debut) & (paies_today['Date_Cmd'] <= date_fin)
-        
-        ventes_especes_jour = paies_today[especes_mask & cmd_in_period_mask]['montant'].sum()
-        reglements_anciens_especes = paies_today[especes_mask & ~cmd_in_period_mask]['montant'].sum()
-        
-        df_autres = paies_today[~especes_mask]
-        autres_paies_jour = df_autres['montant'].sum()
-        paies_tickets_du_jour_total = paies_today[cmd_in_period_mask]['montant'].sum()
-        
-        if not df_autres.empty:
-            for methode, group in df_autres.groupby('methode'):
-                group_in_period_mask = (group['Date_Cmd'] >= date_debut) & (group['Date_Cmd'] <= date_fin)
-                anciens = group[~group_in_period_mask]['montant'].sum()
-                jour = group[group_in_period_mask]['montant'].sum()
-                
-                label = f"↳ {methode}"
-                if anciens > 0 and jour > 0:
-                    html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">{label} (Tickets {lbl_periode.lower()})</span><span>{fmt_prix(jour)} F</span></div>'
-                    html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">{label} (Anciens Crédits)</span><span>{fmt_prix(anciens)} F</span></div>'
-                elif anciens > 0 and jour == 0:
-                    html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">{label} (Anciens Crédits)</span><span>{fmt_prix(anciens)} F</span></div>'
-                else:
-                    html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">{label}</span><span>{fmt_prix(group["montant"].sum())} F</span></div>'
-
-    if html_autres_paies == "":
-        html_autres_paies = f'<div class="line"><span style="padding-left: 20px; color: #555;">↳ Aucun</span><span>0 F</span></div>'
-
-    if not df_cmd.empty:
-        df_cmd['Date_Exploitation'] = (pd.to_datetime(df_cmd['date_creation']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
-        cmd_today = df_cmd[(df_cmd['Date_Exploitation'] >= date_debut) & (df_cmd['Date_Exploitation'] <= date_fin)]
-        ca_brut_ttc = cmd_today['total'].sum()
-        pourboires = cmd_today['pourboire'].sum()
-        nb_tickets = len(cmd_today)
-    else:
-        ca_brut_ttc, pourboires, nb_tickets = 0.0, 0.0, 0
-        
-    credits_du_jour = max(0.0, ca_brut_ttc - paies_tickets_du_jour_total)
-    total_especes_attendu = fond_caisse + entrees_mvt + ventes_especes_jour + reglements_anciens_especes - sorties_mvt
-    
-    st.markdown("#### 💵 TIROIR-CAISSE (État des espèces)")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.write(f"**➕ Fond de Caisse :** {fmt_prix(fond_caisse)} F")
-        st.write(f"**➕ Entrées Diverses :** {fmt_prix(entrees_mvt)} F")
-    with c2:
-        st.write(f"**➕ Ventes Espèces {lbl_periode} :** {fmt_prix(ventes_especes_jour)} F")
-        st.write(f"**➕ Règlements (Anciens Crédits) :** {fmt_prix(reglements_anciens_especes)} F")
-    with c3:
-        st.write(f"**➖ Sorties (Dépenses) :** - {fmt_prix(sorties_mvt)} F")
-        st.markdown(f"<h3 style='color:#0288d1; margin-top:5px;'>= TOTAL ESPÈCES : {fmt_prix(total_especes_attendu)} F</h3>", unsafe_allow_html=True)
-        
-    st.divider()
-    st.markdown(f"#### 📈 PERFORMANCES ({titre_periode.upper()})")
-    cc1, cc2, cc3, cc4 = st.columns(4)
-    cc1.metric("CA Réalisé (TTC)", f"{fmt_prix(ca_brut_ttc)} F")
-    cc2.metric("Encaissé Autre", f"{fmt_prix(autres_paies_jour)} F")
-    cc3.metric(f"Tickets à Crédit {lbl_periode}", f"{fmt_prix(credits_du_jour)} F")
-    cc4.metric("Pourboires", f"{fmt_prix(pourboires)} F")
-    
-    st.divider()
-    
-    df_tous_tickets = pd.read_sql_query("SELECT id as 'N°', date_creation as 'Heure', type_commande as 'Type', statut as 'Statut', COALESCE(methode_paiement, '-') as 'Paiement', total as 'Total (FCFA)' FROM Commandes WHERE statut != 'En attente' ORDER BY id DESC", conn)
-    df_tous_tickets['Date_Exploitation'] = (pd.to_datetime(df_tous_tickets['Heure']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
-    tickets_du_jour = df_tous_tickets[(df_tous_tickets['Date_Exploitation'] >= date_debut) & (df_tous_tickets['Date_Exploitation'] <= date_fin)].copy()
-    
-    if not tickets_du_jour.empty:
-        if date_debut != date_fin:
-            tickets_du_jour['Heure'] = pd.to_datetime(tickets_du_jour['Heure']).dt.strftime('%d/%m %H:%M')
+    with tab_z:
+        df_mvt = pd.read_sql_query("SELECT type_mouvement, montant, date_mvt FROM Mouvements_Caisse", conn)
+        if not df_mvt.empty:
+            df_mvt['Date_Exploitation'] = (pd.to_datetime(df_mvt['date_mvt']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+            df_mvt_today = df_mvt[(df_mvt['Date_Exploitation'] >= date_debut) & (df_mvt['Date_Exploitation'] <= date_fin)]
+            fond_caisse = df_mvt_today[df_mvt_today['type_mouvement'] == 'Fond de Caisse']['montant'].sum()
+            entrees_mvt = df_mvt_today[df_mvt_today['type_mouvement'] == 'Entrée']['montant'].sum()
+            sorties_mvt = df_mvt_today[df_mvt_today['type_mouvement'] == 'Sortie']['montant'].sum()
         else:
-            tickets_du_jour['Heure'] = pd.to_datetime(tickets_du_jour['Heure']).dt.strftime('%H:%M')
-        tickets_du_jour['Total (FCFA)'] = tickets_du_jour['Total (FCFA)'].apply(fmt_prix)
-        html_tickets = tickets_du_jour.drop(columns=['Date_Exploitation']).to_html(index=False)
-    else:
-        html_tickets = f"<p>Aucun ticket émis {titre_periode}.</p>"
-
-    html_z_caisse = f"""
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>Rapport de Caisse</title>
-        <style>
-            body {{ font-family: sans-serif; margin: 20px; }}
-            h2 {{ text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; }}
-            .section {{ margin-top: 20px; }}
-            .line {{ display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dotted #ccc; }}
-            .total {{ font-weight: bold; font-size: 1.2em; border-top: 2px solid #000; padding-top: 10px; margin-top: 10px; }}
-            @media print {{ button {{ display: none; }} }}
-        </style>
-    </head>
-    <body>
-        <h2>RAPPORT DE CAISSE - {titre_periode.upper()}</h2>
-        <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter PDF / Imprimer le Rapport</button>
+            fond_caisse, entrees_mvt, sorties_mvt = 0.0, 0.0, 0.0
+            
+        # MODIFICATION ICI : On utilise NOT LIKE pour exclure TOUTES les variantes de crédits (y compris les réglés)
+        df_paies = pd.read_sql_query("SELECT p.montant, p.methode, p.date_paiement, c.date_creation FROM Paiements_Ticket p JOIN Commandes c ON p.commande_id = c.id WHERE p.methode NOT LIKE '%À Crédit%' AND p.methode NOT LIKE '%Note de Chambre%' AND c.statut != 'Annulée'", conn)
         
-        <div class="section">
-            <h3>1. TIROIR-CAISSE (ESPÈCES)</h3>
-            <div class="line"><span>Fond de Caisse</span><span>{fmt_prix(fond_caisse)} F</span></div>
-            <div class="line"><span>Ventes en Espèces (Tickets de la période)</span><span>{fmt_prix(ventes_especes_jour)} F</span></div>
-            <div class="line"><span>Règlements d'anciens Crédits (Espèces)</span><span>{fmt_prix(reglements_anciens_especes)} F</span></div>
-            <div class="line"><span>Entrées Diverses</span><span>{fmt_prix(entrees_mvt)} F</span></div>
-            <div class="line"><span>Sorties / Dépenses Caisse</span><span>- {fmt_prix(sorties_mvt)} F</span></div>
-            <div class="line total"><span>TOTAL ESPÈCES ATTENDU</span><span>{fmt_prix(total_especes_attendu)} F</span></div>
-        </div>
+        df_cmd = pd.read_sql_query("SELECT id, total, pourboire, date_creation, statut FROM Commandes WHERE statut IN ('Payée', 'À Crédit')", conn)
         
-        <div class="section">
-            <h3>2. CHIFFRE D'AFFAIRES & GESTION</h3>
-            <div class="line"><span>Chiffre d'Affaires Réalisé (TTC)</span><span>{fmt_prix(ca_brut_ttc)} F</span></div>
-            <div class="line"><span>Nombre de tickets émis</span><span>{nb_tickets}</span></div>
-            <div class="line"><span><strong>Paiements Numériques / Chèques</strong></span><span><strong>{fmt_prix(autres_paies_jour)} F</strong></span></div>
-            {html_autres_paies}
-            <div class="line"><span>Créances Client (Nouveaux crédits)</span><span>{fmt_prix(credits_du_jour)} F</span></div>
-            <div class="line"><span>Pourboires enregistrés</span><span>{fmt_prix(pourboires)} F</span></div>
-        </div>
-    </body>
-    </html>
-    """
+        ventes_especes_jour = 0.0
+        reglements_anciens_especes = 0.0
+        autres_paies_jour = 0.0
+        paies_tickets_du_jour_total = 0.0
+        html_autres_paies = ""
+        
+        if not df_paies.empty:
+            df_paies['Date_Paie'] = (pd.to_datetime(df_paies['date_paiement']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+            df_paies['Date_Cmd'] = (pd.to_datetime(df_paies['date_creation']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+            paies_today = df_paies[(df_paies['Date_Paie'] >= date_debut) & (df_paies['Date_Paie'] <= date_fin)]
+            
+            especes_mask = paies_today['methode'].str.contains('Espèces', case=False, na=False)
+            cmd_in_period_mask = (paies_today['Date_Cmd'] >= date_debut) & (paies_today['Date_Cmd'] <= date_fin)
+            
+            ventes_especes_jour = paies_today[especes_mask & cmd_in_period_mask]['montant'].sum()
+            reglements_anciens_especes = paies_today[especes_mask & ~cmd_in_period_mask]['montant'].sum()
+            
+            df_autres = paies_today[~especes_mask]
+            autres_paies_jour = df_autres['montant'].sum()
+            paies_tickets_du_jour_total = paies_today[cmd_in_period_mask]['montant'].sum()
+            
+            if not df_autres.empty:
+                for methode, group in df_autres.groupby('methode'):
+                    group_in_period_mask = (group['Date_Cmd'] >= date_debut) & (group['Date_Cmd'] <= date_fin)
+                    anciens = group[~group_in_period_mask]['montant'].sum()
+                    jour = group[group_in_period_mask]['montant'].sum()
+                    
+                    label = f"↳ {methode}"
+                    if anciens > 0 and jour > 0:
+                        html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">{label} (Tickets {lbl_periode.lower()})</span><span>{fmt_prix(jour)} {sys_monnaie}</span></div>'
+                        html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">{label} (Anciens Crédits)</span><span>{fmt_prix(anciens)} {sys_monnaie}</span></div>'
+                    elif anciens > 0 and jour == 0:
+                        html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">{label} (Anciens Crédits)</span><span>{fmt_prix(anciens)} {sys_monnaie}</span></div>'
+                    else:
+                        html_autres_paies += f'<div class="line"><span style="padding-left: 20px; color: #555;">{label}</span><span>{fmt_prix(group["montant"].sum())} {sys_monnaie}</span></div>'
 
-    html_liste_tickets = f"""
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>Liste des Tickets</title>
-        <style>
-            body {{ font-family: sans-serif; margin: 20px; }}
-            h2 {{ text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; }}
-            table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
-            th, td {{ border: 1px solid #aaa; padding: 8px; text-align: left; font-size: 14px; }}
-            th {{ background: #eee; font-weight: bold; }}
-            @media print {{ button {{ display: none; }} }}
-        </style>
-    </head>
-    <body>
-        <h2>LISTE DES TICKETS - {titre_periode.upper()}</h2>
-        <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter PDF / Imprimer la Liste</button>
-        {html_tickets}
-    </body>
-    </html>
-    """
-    
-    col_dlz, col_dlt, _ = st.columns([1.5, 1.5, 1])
-    col_dlz.download_button(
-        label="🖨️ Rapport de Caisse (PDF / Impression)", 
-        data=html_z_caisse, 
-        file_name=f"Rapport_Caisse_{fichier_periode}.html", 
-        mime="text/html", 
-        use_container_width=True
-    )
-    col_dlt.download_button(
-        label="🧾 Liste des Tickets de la période", 
-        data=html_liste_tickets, 
-        file_name=f"Tickets_{fichier_periode}.html", 
-        mime="text/html", 
-        use_container_width=True
-    )
+        if html_autres_paies == "":
+            html_autres_paies = f'<div class="line"><span style="padding-left: 20px; color: #555;">↳ Aucun</span><span>0 {sys_monnaie}</span></div>'
+
+        if not df_cmd.empty:
+            df_cmd['Date_Exploitation'] = (pd.to_datetime(df_cmd['date_creation']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+            cmd_today = df_cmd[(df_cmd['Date_Exploitation'] >= date_debut) & (df_cmd['Date_Exploitation'] <= date_fin)]
+            ca_brut_ttc = cmd_today['total'].sum()
+            pourboires = cmd_today['pourboire'].sum()
+            nb_tickets = len(cmd_today)
+        else:
+            ca_brut_ttc, pourboires, nb_tickets = 0.0, 0.0, 0
+            
+        credits_du_jour = max(0.0, ca_brut_ttc - paies_tickets_du_jour_total)
+        total_especes_attendu = fond_caisse + entrees_mvt + ventes_especes_jour + reglements_anciens_especes - sorties_mvt
+        
+        st.markdown("#### 💵 TIROIR-CAISSE (État des espèces)")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.write(f"**➕ Fond de Caisse :** {fmt_prix(fond_caisse)} {sys_monnaie}")
+            st.write(f"**➕ Entrées Diverses :** {fmt_prix(entrees_mvt)} {sys_monnaie}")
+        with c2:
+            st.write(f"**➕ Ventes Espèces {lbl_periode} :** {fmt_prix(ventes_especes_jour)} {sys_monnaie}")
+            st.write(f"**➕ Règlements (Anciens Crédits) :** {fmt_prix(reglements_anciens_especes)} {sys_monnaie}")
+        with c3:
+            st.write(f"**➖ Sorties (Dépenses) :** - {fmt_prix(sorties_mvt)} {sys_monnaie}")
+            st.markdown(f"<h3 style='color:#0288d1; margin-top:5px;'>= TOTAL ESPÈCES : {fmt_prix(total_especes_attendu)} {sys_monnaie}</h3>", unsafe_allow_html=True)
+            
+        st.divider()
+        st.markdown(f"#### 📈 PERFORMANCES ({titre_periode.upper()})")
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        cc1.metric("CA Réalisé (TTC)", f"{fmt_prix(ca_brut_ttc)} {sys_monnaie}")
+        cc2.metric("Encaissé Autre", f"{fmt_prix(autres_paies_jour)} {sys_monnaie}")
+        cc3.metric(f"Tickets à Crédit {lbl_periode}", f"{fmt_prix(credits_du_jour)} {sys_monnaie}")
+        cc4.metric("Pourboires", f"{fmt_prix(pourboires)} {sys_monnaie}")
+        
+        st.divider()
+        
+        df_tous_tickets = pd.read_sql_query("SELECT id as 'N°', date_creation as 'Heure', type_commande as 'Type', statut as 'Statut', COALESCE(methode_paiement, '-') as 'Paiement', total as 'Total' FROM Commandes WHERE statut != 'En attente' ORDER BY id DESC", conn)
+        df_tous_tickets['Date_Exploitation'] = (pd.to_datetime(df_tous_tickets['Heure']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+        tickets_du_jour = df_tous_tickets[(df_tous_tickets['Date_Exploitation'] >= date_debut) & (df_tous_tickets['Date_Exploitation'] <= date_fin)].copy()
+        
+        if not tickets_du_jour.empty:
+            if date_debut != date_fin: tickets_du_jour['Heure'] = pd.to_datetime(tickets_du_jour['Heure']).dt.strftime('%d/%m %H:%M')
+            else: tickets_du_jour['Heure'] = pd.to_datetime(tickets_du_jour['Heure']).dt.strftime('%H:%M')
+            tickets_du_jour.rename(columns={'Total': f'Total ({sys_monnaie})'}, inplace=True)
+            tickets_du_jour[f'Total ({sys_monnaie})'] = tickets_du_jour[f'Total ({sys_monnaie})'].apply(fmt_prix)
+            html_tickets = tickets_du_jour.drop(columns=['Date_Exploitation']).to_html(index=False)
+        else:
+            html_tickets = f"<p>Aucun ticket émis {titre_periode}.</p>"
+
+        html_z_caisse = f"""
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>Rapport de Caisse</title>
+            <style>
+                body {{ font-family: sans-serif; margin: 20px; }}
+                h2 {{ text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; }}
+                .section {{ margin-top: 20px; }}
+                .line {{ display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px dotted #ccc; }}
+                .total {{ font-weight: bold; font-size: 1.2em; border-top: 2px solid #000; padding-top: 10px; margin-top: 10px; }}
+                @media print {{ button {{ display: none; }} }}
+            </style>
+        </head>
+        <body>
+            <h2>RAPPORT DE CAISSE - {titre_periode.upper()}</h2>
+            <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter PDF / Imprimer le Rapport</button>
+            <div class="section">
+                <h3>1. TIROIR-CAISSE (ESPÈCES)</h3>
+                <div class="line"><span>Fond de Caisse</span><span>{fmt_prix(fond_caisse)} {sys_monnaie}</span></div>
+                <div class="line"><span>Ventes en Espèces (Tickets de la période)</span><span>{fmt_prix(ventes_especes_jour)} {sys_monnaie}</span></div>
+                <div class="line"><span>Règlements d'anciens Crédits (Espèces)</span><span>{fmt_prix(reglements_anciens_especes)} {sys_monnaie}</span></div>
+                <div class="line"><span>Entrées Diverses</span><span>{fmt_prix(entrees_mvt)} {sys_monnaie}</span></div>
+                <div class="line"><span>Sorties / Dépenses Caisse</span><span>- {fmt_prix(sorties_mvt)} {sys_monnaie}</span></div>
+                <div class="line total"><span>TOTAL ESPÈCES ATTENDU</span><span>{fmt_prix(total_especes_attendu)} {sys_monnaie}</span></div>
+            </div>
+            <div class="section">
+                <h3>2. CHIFFRE D'AFFAIRES & GESTION</h3>
+                <div class="line"><span>Chiffre d'Affaires Réalisé (TTC)</span><span>{fmt_prix(ca_brut_ttc)} {sys_monnaie}</span></div>
+                <div class="line"><span>Nombre de tickets émis</span><span>{nb_tickets}</span></div>
+                <div class="line"><span><strong>Paiements Numériques / Chèques</strong></span><span><strong>{fmt_prix(autres_paies_jour)} {sys_monnaie}</strong></span></div>
+                {html_autres_paies}
+                <div class="line"><span>Créances Client (Nouveaux crédits)</span><span>{fmt_prix(credits_du_jour)} {sys_monnaie}</span></div>
+                <div class="line"><span>Pourboires enregistrés</span><span>{fmt_prix(pourboires)} {sys_monnaie}</span></div>
+            </div>
+        </body>
+        </html>
+        """
+
+        html_liste_tickets = f"""
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>Liste des Tickets</title>
+            <style>
+                body {{ font-family: sans-serif; margin: 20px; }}
+                h2 {{ text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; }}
+                table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+                th, td {{ border: 1px solid #aaa; padding: 8px; text-align: left; font-size: 14px; }}
+                th {{ background: #eee; font-weight: bold; }}
+                @media print {{ button {{ display: none; }} }}
+            </style>
+        </head>
+        <body>
+            <h2>LISTE DES TICKETS - {titre_periode.upper()}</h2>
+            <button onclick="window.print()" style="padding: 12px; margin-bottom: 20px; font-size: 16px; cursor: pointer;">🖨️ Exporter PDF / Imprimer la Liste</button>
+            {html_tickets}
+        </body>
+        </html>
+        """
+        
+        col_dlz, col_dlt, _ = st.columns([1.5, 1.5, 1])
+        col_dlz.download_button(label="🖨️ Rapport de Caisse (PDF / Impression)", data=html_z_caisse, file_name=f"Rapport_Caisse_{fichier_periode}.html", mime="text/html", use_container_width=True)
+        col_dlt.download_button(label="🧾 Liste des Tickets de la période", data=html_liste_tickets, file_name=f"Tickets_{fichier_periode}.html", mime="text/html", use_container_width=True)
+
+    with tab_depenses:
+        # Sécurité : on s'assure que la colonne 'motif' existe bien dans la table Mouvements_Caisse
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(Mouvements_Caisse)")
+        cols_caisse = [c[1] for c in cursor.fetchall()]
+        if "motif" not in cols_caisse:
+            cursor.execute("ALTER TABLE Mouvements_Caisse ADD COLUMN motif TEXT DEFAULT '-'")
+            conn.commit()
+            
+        st.markdown("#### 📝 Saisir un mouvement de caisse (Dépense / Entrée)")
+        with st.form("form_mouvement_caisse"):
+            c_type, c_mnt = st.columns(2)
+            type_mvt_caisse = c_type.selectbox("Type d'opération", ["Sortie (Dépense)", "Entrée (Divers)", "Fond de Caisse"])
+            mnt_mvt_caisse = c_mnt.number_input(f"Montant ({sys_monnaie})", min_value=1.0, step=1000.0)
+            motif_mvt_caisse = st.text_input("Motif / Bénéficiaire (ex: Achat de papier, Paiement livreur, etc.)", placeholder="Obligatoire pour les dépenses...")
+            
+            if st.form_submit_button("💾 Enregistrer l'opération dans le tiroir"):
+                if type_mvt_caisse == "Sortie (Dépense)" and not motif_mvt_caisse:
+                    st.error("⚠️ Veuillez indiquer un motif pour justifier cette dépense.")
+                else:
+                    type_db = type_mvt_caisse.split(" ")[0] # Prend 'Sortie', 'Entrée', ou 'Fond'
+                    if type_mvt_caisse == "Fond de Caisse": type_db = "Fond de Caisse"
+                    
+                    cursor.execute("INSERT INTO Mouvements_Caisse (type_mouvement, montant, motif, date_mvt) VALUES (?, ?, ?, ?)", (type_db, mnt_mvt_caisse, motif_mvt_caisse, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                    conn.commit()
+                    st.success("Mouvement enregistré ! Il apparaîtra dans votre Z de caisse.")
+                    st.rerun()
+                    
+        st.divider()
+        st.markdown(f"#### 📜 Historique des mouvements (Période : {titre_periode})")
+        df_historique_mvt = pd.read_sql_query("SELECT id, date_mvt, type_mouvement, motif, montant FROM Mouvements_Caisse ORDER BY id DESC", conn)
+        
+        if not df_historique_mvt.empty:
+            df_historique_mvt['Date_Exploitation'] = (pd.to_datetime(df_historique_mvt['date_mvt']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+            df_hist_filtre = df_historique_mvt[(df_historique_mvt['Date_Exploitation'] >= date_debut) & (df_historique_mvt['Date_Exploitation'] <= date_fin)].copy()
+            
+            if not df_hist_filtre.empty:
+                df_hist_filtre['date_mvt'] = pd.to_datetime(df_hist_filtre['date_mvt']).dt.strftime(sys_format_date)
+                df_hist_filtre.rename(columns={'date_mvt': 'Date et Heure', 'type_mouvement': 'Type', 'motif': 'Motif / Justification', 'montant': f'Montant ({sys_monnaie})'}, inplace=True)
+                df_hist_filtre[f'Montant ({sys_monnaie})'] = df_hist_filtre[f'Montant ({sys_monnaie})'].apply(fmt_prix)
+                st.dataframe(df_hist_filtre.drop(columns=['id', 'Date_Exploitation']), use_container_width=True, hide_index=True)
+            else:
+                st.info("Aucun mouvement enregistré sur cette période.")
+        else:
+            st.info("Aucun mouvement enregistré.")
+
+    with tab_stats:
+        st.markdown(f"#### 🏆 Palmarès des Ventes (Période : {titre_periode})")
+        
+        df_stats = pd.read_sql_query("""
+            SELECT p.nom as Article, lc.quantite as Quantite, lc.sous_total as CA, c.date_creation 
+            FROM Lignes_Commande lc
+            JOIN Produits p ON lc.produit_id = p.id
+            JOIN Commandes c ON lc.commande_id = c.id
+            WHERE c.statut IN ('Payée', 'À Crédit')
+        """, conn)
+        
+        if not df_stats.empty:
+            df_stats['Date_Exploitation'] = (pd.to_datetime(df_stats['date_creation']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
+            df_stats_period = df_stats[(df_stats['Date_Exploitation'] >= date_debut) & (df_stats['Date_Exploitation'] <= date_fin)]
+            
+            if not df_stats_period.empty:
+                df_group = df_stats_period.groupby('Article').agg({'Quantite': 'sum', 'CA': 'sum'}).reset_index()
+                
+                c_stat1, c_stat2 = st.columns(2)
+                
+                with c_stat1:
+                    st.markdown("**📦 Top 10 - Articles les plus vendus (Quantité)**")
+                    df_top_qte = df_group.sort_values(by='Quantite', ascending=False).head(10)
+                    if not df_top_qte.empty:
+                        st.bar_chart(df_top_qte.set_index('Article')['Quantite'])
+                        
+                with c_stat2:
+                    st.markdown(f"**💰 Top 10 - Articles les plus rentables (CA en {sys_monnaie})**")
+                    df_top_ca = df_group.sort_values(by='CA', ascending=False).head(10)
+                    if not df_top_ca.empty:
+                        st.bar_chart(df_top_ca.set_index('Article')['CA'])
+            else:
+                st.info("Aucune donnée de vente pour générer les graphiques sur cette période.")
+        else:
+            st.info("La base de données est vide. Vendez quelques articles pour voir apparaître les statistiques !")
 
 elif menu == "Paramètres":
     st.markdown("### ⚙️ Paramètres du Système")
     tab_resto, tab_paiement, tab_zones, tab_formats, tab_backup = st.tabs(["1. Infos Commerce", "2. Paiement", "3. Zones Livraison", "4. Formats", "5. Sauvegarde"])
     with tab_resto:
-        param = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id = 1", conn).iloc[0]
+        # C'est cette ligne qui manquait pour définir 'param' !
+        param = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
+        
         with st.form("form_param_resto"):
             c1, c2 = st.columns(2)
             p_nom = c1.text_input("Nom de l'établissement", value=param["nom"])
             p_ninea = c2.text_input("NINEA / RCCM", value=param["ninea"])
+            
             p_tel = c1.text_input("Téléphone", value=param["telephone"])
-            p_tva = c2.number_input("Taux de TVA par défaut", value=float(param["tva"]), step=1.0)
+            p_monnaie = c2.text_input("Monnaie / Devise (ex: FCFA, €, $)", value=param.get("monnaie", "FCFA"))
+            
+            p_tva = c1.number_input("Taux de TVA par défaut", value=float(param["tva"]), step=1.0)
             val_heure = int(param.get("heure_fin_service", 5)) if not pd.isna(param.get("heure_fin_service")) else 5
-            p_heure_fin = c1.number_input("Heure de clôture de caisse (ex: 5 pour 05h00 du matin)", value=val_heure, min_value=0, max_value=23, step=1)
+            p_heure_fin = c2.number_input("Heure de clôture (ex: 5 pour 05h00)", value=val_heure, min_value=0, max_value=23, step=1)
+            
             p_adr = st.text_area("Adresse complète", value=param["adresse"])
+            
             if st.form_submit_button("Sauvegarder les informations"):
                 cursor = conn.cursor()
-                cursor.execute("UPDATE Parametres_Restaurant SET nom=?, adresse=?, telephone=?, ninea=?, tva=?, heure_fin_service=? WHERE id=1", (p_nom, p_adr, p_tel, p_ninea, p_tva, p_heure_fin))
+                cursor.execute("UPDATE Parametres_Restaurant SET nom=?, adresse=?, telephone=?, ninea=?, tva=?, heure_fin_service=?, monnaie=? WHERE id=1", (p_nom, p_adr, p_tel, p_ninea, p_tva, p_heure_fin, p_monnaie))
                 conn.commit()
                 st.success("Paramètres mis à jour !"); st.rerun()
-                
+
     with tab_paiement:
         col1, col2 = st.columns(2)
         with col1:
@@ -2134,6 +2207,7 @@ elif menu == "Prise de Commande":
                         
                         for p_f in montants_finaux: cursor.execute("INSERT INTO Paiements_Ticket (commande_id, methode, montant, date_paiement) VALUES (?, ?, ?, ?)", (cmd_id, p_f["methode"], p_f["montant"], date_paie_sql))
 
+
                         params = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
                         p_nom_r = params["nom"] if params["nom"] else "VOTRE COMMERCE"
 
@@ -2143,7 +2217,7 @@ elif menu == "Prise de Commande":
                         if params["telephone"]: ticket_str += f"Tel: {params['telephone']}".center(42) + "\n"
                         if params["ninea"]: ticket_str += f"NINEA: {params['ninea']}".center(42) + "\n"
                         ticket_str += "-" * 42 + "\n"
-                        ticket_str += f"TICKET #{cmd_id} - {datetime.datetime.now().strftime(sys_format_date)}\n"
+                        ticket_str += f"FACTURE N° {cmd_id} - {datetime.datetime.now().strftime(sys_format_date)}\n"
                         ticket_str += f"Caissier: {st.session_state.utilisateur['nom']}\n"
                         ticket_str += f"Type: {type_cmd} | Reglement: {methode_principale}\n"
                         if client_id_db: ticket_str += f"Code Client: CLI-{client_id_db:04d}\n"
@@ -2159,25 +2233,44 @@ elif menu == "Prise de Commande":
                         ticket_str += "-" * 42 + "\n"
 
                         tva_totale = 0.0
+                        total_ht_global = 0.0
+                        
                         for p_id, item in st.session_state.panier.items():
                             qte_nette = item["qte"] + item.get("qte_offert", 0) - item.get("qte_retour", 0)
+                            tva_rate = item.get("tva_rate", 0.0) if item.get("applique_tva", 1) == 1 else 0.0
+                            
                             if item["qte"] > 0:
-                                stot = item["prix_base"] * item["qte"]
-                                if item.get("applique_tva", 1) == 1 and item.get("tva_rate", 0.0) > 0:
-                                    tva_totale += stot - (stot / (1 + item["tva_rate"] / 100))
+                                stot_ttc = item["prix_base"] * item["qte"]
+                                pu_ht = item["prix_base"] / (1 + tva_rate / 100)
+                                stot_ht = stot_ttc / (1 + tva_rate / 100)
                                 
-                                cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (cmd_id, p_id, item["qte"], item["prix_base"], stot, item.get("qte_envoyee", 0), item.get("qte_offert_envoyee", 0), 0))
-                                ticket_str += f"{fmt_qte(item['qte'])}x {item['nom']}\n"
-                                ticket_str += f"{fmt_prix(item['prix_base'])} F".rjust(20) + f"{fmt_prix(stot)} F".rjust(22) + "\n"
+                                total_ht_global += stot_ht
+                                tva_totale += (stot_ttc - stot_ht)
+                                
+                                cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (cmd_id, p_id, item["qte"], item["prix_base"], stot_ttc, item.get("qte_envoyee", 0), item.get("qte_offert_envoyee", 0), 0))
+                                
+                                nom_complet = f"{fmt_qte(item['qte'])}x {item['nom']}"
+                                for ligne_nom in textwrap.wrap(nom_complet, width=42): ticket_str += f"{ligne_nom}\n"
+                                ticket_str += f"PU HT: {fmt_prix(pu_ht)} {sys_monnaie}".rjust(20) + f"PT HT: {fmt_prix(stot_ht)} {sys_monnaie}".rjust(22) + "\n"
+                                
                             if item.get("qte_offert", 0) > 0:
                                 cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, 0.0, 0.0, 0, ?, 0)", (cmd_id, p_id, item["qte_offert"], item.get("qte_offert_envoyee", 0)))
-                                ticket_str += f"{fmt_qte(item['qte_offert'])}x {item['nom']} (Offert)\n"
-                                ticket_str += f"0 F".rjust(20) + f"0 F".rjust(22) + "\n"
+                                nom_complet = f"{fmt_qte(item['qte_offert'])}x {item['nom']} (Offert)"
+                                for ligne_nom in textwrap.wrap(nom_complet, width=42): ticket_str += f"{ligne_nom}\n"
+                                ticket_str += f"PU HT: 0 {sys_monnaie}".rjust(20) + f"PT HT: 0 {sys_monnaie}".rjust(22) + "\n"
+                                
                             if item.get("qte_retour", 0) > 0:
-                                stot_r = -item["prix_base"] * item["qte_retour"]
-                                cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, 0, 0, ?)", (cmd_id, p_id, -item["qte_retour"], item["prix_base"], stot_r, item.get("qte_retour_envoyee", 0)))
-                                ticket_str += f"-{fmt_qte(item['qte_retour'])}x {item['nom']} (Annulation)\n"
-                                ticket_str += f"{fmt_prix(item['prix_base'])} F".rjust(20) + f"{fmt_prix(stot_r)} F".rjust(22) + "\n"
+                                stot_ttc_r = -item["prix_base"] * item["qte_retour"]
+                                pu_ht_r = item["prix_base"] / (1 + tva_rate / 100)
+                                stot_ht_r = stot_ttc_r / (1 + tva_rate / 100)
+                                
+                                total_ht_global += stot_ht_r
+                                tva_totale += (stot_ttc_r - stot_ht_r)
+                                
+                                cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, 0, 0, ?)", (cmd_id, p_id, -item["qte_retour"], item["prix_base"], stot_ttc_r, item.get("qte_retour_envoyee", 0)))
+                                nom_complet = f"-{fmt_qte(item['qte_retour'])}x {item['nom']} (Annul.)"
+                                for ligne_nom in textwrap.wrap(nom_complet, width=42): ticket_str += f"{ligne_nom}\n"
+                                ticket_str += f"PU HT: {fmt_prix(pu_ht_r)} {sys_monnaie}".rjust(20) + f"PT HT: {fmt_prix(stot_ht_r)} {sys_monnaie}".rjust(22) + "\n"
 
                             if qte_nette != 0:
                                 cursor.execute("SELECT depot_id FROM Produits WHERE id = ?", (p_id,))
@@ -2201,26 +2294,26 @@ elif menu == "Prise de Commande":
                                     if res_stock: cursor.execute("UPDATE Stock_Plats SET quantite = quantite - ? WHERE produit_id = ? AND depot_id = ?", (qte_stock_deduct, base_id, depot_plat_id))
                                     else: cursor.execute("INSERT INTO Stock_Plats (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (base_id, depot_plat_id, -qte_stock_deduct))
                                     
-                                    cursor.execute("INSERT INTO Mouvements_Stock (produit_id, depot_id, type_mouvement, quantite, reference) VALUES (?, ?, 'Sortie (Vente)', ?, ?)", (p_id, depot_plat_id, qte_nette, f"Vente - Ticket #{cmd_id}"))
+                                    cursor.execute("INSERT INTO Mouvements_Stock (produit_id, depot_id, type_mouvement, quantite, reference) VALUES (?, ?, 'Sortie (Vente)', ?, ?)", (p_id, depot_plat_id, qte_nette, f"Vente - Facture N° {cmd_id}"))
 
                         ticket_str += "-" * 42 + "\n"
                         
                         if type_cmd == "Livraison" and frais_livraison_actuel > 0:
-                            tot_prods = total_commande - frais_livraison_actuel
-                            ticket_str += f"TOTAL : {fmt_prix(tot_prods)} FCFA".rjust(42) + "\n"
-                            if tva_totale > 0: ticket_str += f"Dont TVA : {fmt_prix(tva_totale)} FCFA".rjust(42) + "\n"
-                            ticket_str += f"FRAIS DE LIVRAISON : {fmt_prix(frais_livraison_actuel)} FCFA".rjust(42) + "\n"
-                            ticket_str += f"TOTAL : {fmt_prix(total_commande)} FCFA".rjust(42) + "\n"
+                            ticket_str += f"TOTAL HT : {fmt_prix(total_ht_global)} {sys_monnaie}".rjust(42) + "\n"
+                            ticket_str += f"TOTAL TVA : {fmt_prix(tva_totale)} {sys_monnaie}".rjust(42) + "\n"
+                            ticket_str += f"FRAIS LIVRAISON : {fmt_prix(frais_livraison_actuel)} {sys_monnaie}".rjust(42) + "\n"
+                            ticket_str += f"NET A PAYER : {fmt_prix(total_commande)} {sys_monnaie}".rjust(42) + "\n"
                         else:
-                            ticket_str += f"TOTAL : {fmt_prix(total_commande)} FCFA".rjust(42) + "\n"
-                            if tva_totale > 0: ticket_str += f"Dont TVA : {fmt_prix(tva_totale)} FCFA".rjust(42) + "\n"
+                            ticket_str += f"TOTAL HT : {fmt_prix(total_ht_global)} {sys_monnaie}".rjust(42) + "\n"
+                            ticket_str += f"TOTAL TVA : {fmt_prix(tva_totale)} {sys_monnaie}".rjust(42) + "\n"
+                            ticket_str += f"NET A PAYER : {fmt_prix(total_commande)} {sys_monnaie}".rjust(42) + "\n"
                                 
                         ticket_str += "-" * 42 + "\n"
                         
                         for pf in st.session_state.paiements_partiels:
-                            if not (pf['methode'] in ["À Crédit"]): ticket_str += f"Reçu en {pf['methode']} : {fmt_prix(pf['montant'])} FCFA".rjust(42) + "\n"
+                            if not (pf['methode'] in ["À Crédit"]): ticket_str += f"Reçu en {pf['methode']} : {fmt_prix(pf['montant'])} {sys_monnaie}".rjust(42) + "\n"
                         
-                        if rendu_monnaie > 0: ticket_str += f"MONNAIE RENDUE : {fmt_prix(rendu_monnaie)} FCFA".rjust(42) + "\n"
+                        if rendu_monnaie > 0: ticket_str += f"MONNAIE RENDUE : {fmt_prix(rendu_monnaie)} {sys_monnaie}".rjust(42) + "\n"
 
                         ticket_str += "\n"
                         ticket_str += f"{'=== MERCI DE VOTRE VISITE ===':^42}\n"
@@ -2229,7 +2322,7 @@ elif menu == "Prise de Commande":
                         else: ticket_str += "\n\n\n"
 
                         conn.commit()
-
+                        
                         msg_print = ""
                         
                         if auto_print:
@@ -2405,7 +2498,8 @@ elif menu == "Prise de Commande":
                 dict_all_prods = {}
                 for _, row in df_all_prods.iterrows():
                     lbl_code = f"[{row['code_barre']}] " if pd.notna(row['code_barre']) and str(row['code_barre']).strip() != "" else ""
-                    dict_all_prods[f"{lbl_code}{row['nom']} - {fmt_prix(row['prix'])} F"] = row['id']
+                    # MODIFICATION ICI : On utilise la variable sys_monnaie
+                    dict_all_prods[f"{lbl_code}{row['nom']} - {fmt_prix(row['prix'])} {sys_monnaie}"] = row['id']
                     
                 with st.form("form_recherche_globale", clear_on_submit=True):
                     col_scan, col_search, col_sbtn = st.columns([1.5, 3.5, 1])
@@ -2480,7 +2574,8 @@ elif menu == "Prise de Commande":
                             
                             for index, row in group.reset_index().iterrows():
                                 col_idx = index % 4
-                                if cols_produits[col_idx].button(f"{row['nom']}\n{fmt_prix(row['prix'])} F", key=f"btn_prod_{row['id']}", use_container_width=True):
+                                # MODIFICATION ICI : On utilise la variable sys_monnaie sur les boutons
+                                if cols_produits[col_idx].button(f"{row['nom']}\n{fmt_prix(row['prix'])} {sys_monnaie}", key=f"btn_prod_{row['id']}", use_container_width=True):
                                     p_id = int(row["id"])
                                     if p_id in st.session_state.panier: 
                                         st.session_state.panier[p_id]["qte"] += 1
@@ -2743,13 +2838,16 @@ elif menu == "Prise de Commande":
                 params = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
                 p_nom_r = params["nom"] if params["nom"] else "VOTRE COMMERCE"
 
+                # ====================================================
+                # 1. GÉNÉRATION DU TICKET THERMIQUE (42 caractères max)
+                # ====================================================
                 ticket_str = f"=== {p_nom_r.upper()} ==="[:42].center(42) + "\n"
                 if params["adresse"]:
                     for ligne_adr_r in textwrap.wrap(params["adresse"], width=42): ticket_str += f"{ligne_adr_r.center(42)}\n"
                 if params["telephone"]: ticket_str += f"Tel: {params['telephone']}".center(42) + "\n"
                 if params["ninea"]: ticket_str += f"NINEA: {params['ninea']}".center(42) + "\n"
                 ticket_str += "-" * 42 + "\n"
-                ticket_str += f"{('DUPLICATA TICKET #'+str(ticket_id_int)):^42}\n"
+                ticket_str += f"{('FACTURE N° '+str(ticket_id_int)):^42}\n"
                 if info_cmd["nom_serveur"]: ticket_str += f"Caissier: {info_cmd['nom_serveur']}\n"
                 ticket_str += f"Date: {fmt_date(info_cmd['date_creation'])}\n"
                 ticket_str += f"Type: {info_cmd['type_commande']} | {info_cmd['methode_paiement']}\n"
@@ -2765,35 +2863,50 @@ elif menu == "Prise de Commande":
                 ticket_str += "-" * 42 + "\n"
 
                 tva_totale_hist = 0.0
+                total_ht_hist = 0.0
+                html_lignes = "" 
+                
                 for _, row in df_lignes_detail.iterrows(): 
                     nom_plat = row["nom"]
-                    if row["quantite"] > 0 and row["applique_tva"] == 1 and row["tva_rate"] > 0:
-                        tva_totale_hist += row["sous_total"] - (row["sous_total"] / (1 + row["tva_rate"] / 100))
-                        
-                    if row["prix_unitaire"] == 0 and row["quantite"] > 0: qte_str = f"{fmt_qte(row['quantite'])}x {nom_plat} (Offert)"
-                    elif row["quantite"] < 0: qte_str = f"{fmt_qte(row['quantite'])}x {nom_plat} (Annul.)"
-                    else: qte_str = f"{fmt_qte(row['quantite'])}x {nom_plat}"
+                    qte = row["quantite"]
+                    pu_ttc = row["prix_unitaire"]
+                    stot_ttc = row["sous_total"]
+                    tva_rate = row["tva_rate"] if row["applique_tva"] == 1 else 0.0
                     
-                    ticket_str += f"{qte_str}\n"
-                    p_u_str = f"{fmt_prix(row['prix_unitaire'])} F"
-                    s_t_str = f"{fmt_prix(row['sous_total'])} F"
+                    if pu_ttc == 0 and qte > 0: 
+                        nom_complet = f"{fmt_qte(qte)}x {nom_plat} (Offert)"
+                        pu_ht = 0.0
+                        stot_ht = 0.0
+                    elif qte < 0: 
+                        nom_complet = f"{fmt_qte(qte)}x {nom_plat} (Annul.)"
+                        pu_ht = abs(pu_ttc) / (1 + tva_rate / 100)
+                        stot_ht = stot_ttc / (1 + tva_rate / 100)
+                    else: 
+                        nom_complet = f"{fmt_qte(qte)}x {nom_plat}"
+                        pu_ht = pu_ttc / (1 + tva_rate / 100)
+                        stot_ht = stot_ttc / (1 + tva_rate / 100)
+                    
+                    total_ht_hist += stot_ht
+                    tva_totale_hist += (stot_ttc - stot_ht)
+                    
+                    for ligne_nom in textwrap.wrap(nom_complet, width=42): 
+                        ticket_str += f"{ligne_nom}\n"
+                    p_u_str = f"PU HT: {fmt_prix(pu_ht)} {sys_monnaie}"
+                    s_t_str = f"PT HT: {fmt_prix(stot_ht)} {sys_monnaie}"
                     ticket_str += f"{p_u_str:>20}{s_t_str:>22}\n"
+                    
+                    html_lignes += f"<tr><td style='border: 1px solid #ddd; padding: 8px; text-align: center;'>{fmt_qte(qte)}</td><td style='border: 1px solid #ddd; padding: 8px;'>{nom_plat}</td><td style='border: 1px solid #ddd; padding: 8px; text-align: right;'>{fmt_prix(pu_ht)} {sys_monnaie}</td><td style='border: 1px solid #ddd; padding: 8px; text-align: right;'>{fmt_prix(stot_ht)} {sys_monnaie}</td></tr>"
 
                 ticket_str += "-" * 42 + "\n"
                 
                 frais_liv = float(info_cmd['frais_livraison']) if info_cmd['frais_livraison'] else 0.0
                 total_cmd = float(info_cmd['total'])
                 
+                ticket_str += f"TOTAL HT : {fmt_prix(total_ht_hist)} {sys_monnaie}".rjust(42) + "\n"
+                ticket_str += f"TOTAL TVA : {fmt_prix(tva_totale_hist)} {sys_monnaie}".rjust(42) + "\n"
                 if info_cmd['type_commande'] == "Livraison" and frais_liv > 0:
-                    total_produits = total_cmd - frais_liv
-                    ticket_str += f"TOTAL : {fmt_prix(total_produits)} FCFA".rjust(42) + "\n"
-                    if tva_totale_hist > 0: ticket_str += f"Dont TVA : {fmt_prix(tva_totale_hist)} FCFA".rjust(42) + "\n"
-                    ticket_str += f"FRAIS DE LIVRAISON : {fmt_prix(frais_liv)} FCFA".rjust(42) + "\n"
-                    ticket_str += f"TOTAL : {fmt_prix(total_cmd)} FCFA".rjust(42) + "\n"
-                else:
-                    ticket_str += f"TOTAL : {fmt_prix(total_cmd)} FCFA".rjust(42) + "\n"
-                    if tva_totale_hist > 0: ticket_str += f"Dont TVA : {fmt_prix(tva_totale_hist)} FCFA".rjust(42) + "\n"
-
+                    ticket_str += f"FRAIS LIVRAISON : {fmt_prix(frais_liv)} {sys_monnaie}".rjust(42) + "\n"
+                ticket_str += f"NET A PAYER : {fmt_prix(total_cmd)} {sys_monnaie}".rjust(42) + "\n"
                 ticket_str += "-" * 42 + "\n"
                 
                 rendu_monnaie_historique = 0.0
@@ -2801,9 +2914,9 @@ elif menu == "Prise de Commande":
                     total_paye_hist = df_paiements_detail['montant'].sum()
                     pourb = float(info_cmd.get('pourboire', 0.0)) if not pd.isna(info_cmd.get('pourboire')) else 0.0
                     rendu_monnaie_historique = max(0.0, total_paye_hist - total_cmd - pourb)
-                    for _, p_row in df_paiements_detail.iterrows(): ticket_str += f"Reçu en {p_row['methode']} : {fmt_prix(p_row['montant'])} FCFA".rjust(42) + "\n"
+                    for _, p_row in df_paiements_detail.iterrows(): ticket_str += f"Reçu en {p_row['methode']} : {fmt_prix(p_row['montant'])} {sys_monnaie}".rjust(42) + "\n"
                         
-                if rendu_monnaie_historique > 0: ticket_str += f"MONNAIE RENDUE : {fmt_prix(rendu_monnaie_historique)} FCFA".rjust(42) + "\n"
+                if rendu_monnaie_historique > 0: ticket_str += f"MONNAIE RENDUE : {fmt_prix(rendu_monnaie_historique)} {sys_monnaie}".rjust(42) + "\n"
 
                 ticket_str += "\n"
                 ticket_str += f"{'=== MERCI DE VOTRE VISITE ===':^42}\n"
@@ -2813,17 +2926,101 @@ elif menu == "Prise de Commande":
                 else:
                     ticket_str += "\n\n\n"
 
-                col_vue, col_print = st.columns([1, 1])
+                html_facture_a4 = f"""
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <title>Facture N°{ticket_id_int}</title>
+                    <style>
+                        body {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #333; margin: 0; padding: 40px; font-size: 14px; background: #fdfbf7; }}
+                        .invoice-box {{ max-width: 800px; margin: auto; padding: 40px; border: 1px solid #ddd; background: #fff; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }}
+                        .header {{ display: flex; justify-content: space-between; border-bottom: 3px solid #0288d1; padding-bottom: 20px; margin-bottom: 30px; }}
+                        .header h2 {{ margin: 0 0 10px 0; color: #0288d1; font-size: 28px; text-transform: uppercase; }}
+                        .details {{ display: flex; justify-content: space-between; margin-bottom: 30px; line-height: 1.6; }}
+                        table {{ width: 100%; border-collapse: collapse; margin-bottom: 30px; }}
+                        th {{ background-color: #f8f9fa; border: 1px solid #ddd; padding: 12px; text-align: center; font-weight: bold; color: #555; text-transform: uppercase; font-size: 12px; }}
+                        td {{ border: 1px solid #ddd; padding: 10px; }}
+                        .totals {{ width: 350px; float: right; border-top: 2px solid #333; padding-top: 15px; margin-bottom: 50px; }}
+                        .totals-line {{ display: flex; justify-content: space-between; padding: 6px 0; font-size: 15px; }}
+                        .totals-line.bold {{ font-weight: bold; font-size: 1.3em; color: #0288d1; border-top: 1px solid #ddd; padding-top: 10px; margin-top: 5px; }}
+                        .btn-print {{ display: block; width: 200px; margin: 0 auto 30px auto; padding: 12px; background: #0288d1; color: #fff; text-align: center; text-decoration: none; border-radius: 5px; font-weight: bold; cursor: pointer; border: none; }}
+                        @media print {{ 
+                            body {{ padding: 0; background: #fff; }} 
+                            .invoice-box {{ box-shadow: none; border: none; padding: 0; max-width: 100%; }} 
+                            .btn-print {{ display: none; }} 
+                        }}
+                    </style>
+                </head>
+                <body>
+                    <div class="invoice-box">
+                        <button class="btn-print" onclick="window.print()">🖨️ Imprimer la Facture</button>
+                        <div class="header">
+                            <div>
+                                <h2>{p_nom_r}</h2>
+                                <p style="margin:0;">
+                                    {params['adresse'] if params['adresse'] else ''}<br>
+                                    {'Tel: ' + params['telephone'] if params['telephone'] else ''}<br>
+                                    {'NINEA: ' + params['ninea'] if params['ninea'] else ''}
+                                </p>
+                            </div>
+                            <div style="text-align: right;">
+                                <h1 style="margin: 0; color: #333; font-size: 36px; letter-spacing: 2px;">FACTURE</h1>
+                                <p style="margin: 10px 0 0 0; font-size: 16px;">N° <strong>{ticket_id_int}</strong><br>Date : {fmt_date(info_cmd['date_creation'])}</p>
+                            </div>
+                        </div>
+                        <div class="details">
+                            <div>
+                                <span style="color: #777; font-size: 12px; text-transform: uppercase;">Facturé à :</span><br>
+                                <strong>{info_cmd['nom_client'] if info_cmd['nom_client'] else 'Passager'}</strong><br>
+                                {info_cmd['telephone'] if info_cmd['telephone'] else ''}<br>
+                                {info_cmd['adresse'] if info_cmd['adresse'] else ''}
+                            </div>
+                            <div style="text-align: right;">
+                                <span style="color: #777; font-size: 12px; text-transform: uppercase;">Informations :</span><br>
+                                <strong>Vendeur :</strong> {info_cmd['nom_serveur'] if info_cmd['nom_serveur'] else 'Admin'}<br>
+                                <strong>Règlement :</strong> {info_cmd['methode_paiement']}
+                            </div>
+                        </div>
+                        <table>
+                            <thead>
+                                <tr><th style="width: 10%;">Qté</th><th style="width: 50%;">Désignation</th><th style="width: 20%;">PU HT</th><th style="width: 20%;">Montant HT</th></tr>
+                            </thead>
+                            <tbody>
+                                {html_lignes}
+                            </tbody>
+                        </table>
+                        <div class="totals">
+                            <div class="totals-line"><span>Total HT :</span><span>{fmt_prix(total_ht_hist)} {sys_monnaie}</span></div>
+                            <div class="totals-line"><span>TVA :</span><span>{fmt_prix(tva_totale_hist)} {sys_monnaie}</span></div>
+                            {f'<div class="totals-line"><span>Frais de Livraison :</span><span>{fmt_prix(frais_liv)} {sys_monnaie}</span></div>' if frais_liv > 0 else ''}
+                            <div class="totals-line bold"><span>NET À PAYER :</span><span>{fmt_prix(total_cmd)} {sys_monnaie}</span></div>
+                        </div>
+                        <div style="clear: both;"></div>
+                        <div style="text-align: center; border-top: 1px solid #eee; padding-top: 20px; color: #777; font-size: 12px;">
+                            Merci de votre confiance.
+                        </div>
+                    </div>
+                </body>
+                </html>
+                """
+
+                # ====================================================
+                # 3. AFFICHAGE DES BOUTONS DANS L'INTERFACE
+                # ====================================================
+                col_vue, col_print1, col_print2 = st.columns([1.5, 1, 1.2])
                 col_vue.code(ticket_str, language="text")
                 
                 file_date_str_dup = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-                nom_exp_dup = f"Duplicata_Ticket_{ticket_id_int}_{file_date_str_dup}.txt"
+                nom_exp_dup = f"Facture_{ticket_id_int}_{file_date_str_dup}.txt"
+                nom_exp_pdf = f"Facture_A4_{ticket_id_int}_{file_date_str_dup}.html"
                 
                 if hasattr(os, 'startfile'):
-                    if col_print.button("🖨️ Envoyer à l'imprimante (Windows)"):
+                    if col_print1.button("🖨️ Imprimer Thermique", use_container_width=True):
                         if imprimer_ticket_windows(ticket_str, nom_fichier_export=nom_exp_dup, sous_dossier="tickets"): st.success("Impression lancée !")
                         else: st.error("Erreur d'impression.")
                 else:
-                    col_print.download_button(label="🖨️ Télécharger le Ticket (Pour impression Tablette)", data=ticket_str.encode('utf-8-sig'), file_name=nom_exp_dup, mime="text/plain", type="primary", use_container_width=True)
+                    col_print1.download_button(label="⬇️ Télécharger Thermique", data=ticket_str.encode('utf-8-sig'), file_name=nom_exp_dup, mime="text/plain", type="secondary", use_container_width=True)
 
-conn.close()                
+                col_print2.download_button(label="📄 Télécharger Facture A4 (PDF)", data=html_facture_a4.encode('utf-8-sig'), file_name=nom_exp_pdf, mime="text/html", type="primary", use_container_width=True)
+
+conn.close()
