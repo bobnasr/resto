@@ -28,6 +28,7 @@ def force_db_update():
     conn = sqlite3.connect(chemin_db, timeout=20)
     cursor = conn.cursor()
 
+# --- 1. CRÉATION DES TABLES ---
     cursor.executescript("""
         CREATE TABLE IF NOT EXISTS Commandes (id INTEGER PRIMARY KEY AUTOINCREMENT, type_commande TEXT, statut TEXT, total REAL, pourboire REAL DEFAULT 0, nom_client TEXT, telephone TEXT, adresse TEXT, client_id INTEGER, methode_paiement TEXT, date_paiement TIMESTAMP, utilisateur_id INTEGER, zone_id INTEGER, frais_livraison REAL DEFAULT 0, compteur_bons INTEGER DEFAULT 0, date_creation TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS Paiements_Ticket (id INTEGER PRIMARY KEY AUTOINCREMENT, commande_id INTEGER REFERENCES Commandes(id), methode TEXT NOT NULL, montant REAL NOT NULL, date_paiement TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
@@ -45,7 +46,28 @@ def force_db_update():
         CREATE TABLE IF NOT EXISTS Zones_Livraison (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, tarif REAL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS Fournisseurs (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, telephone TEXT, adresse TEXT);
         CREATE TABLE IF NOT EXISTS Mouvements_Caisse (id INTEGER PRIMARY KEY AUTOINCREMENT, type_mouvement TEXT NOT NULL, motif TEXT NOT NULL, montant REAL NOT NULL, utilisateur_id INTEGER REFERENCES Utilisateurs(id), date_mvt TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+        
+        -- NOUVELLES TABLES POUR LE MULTI-CAISSES --
+        CREATE TABLE IF NOT EXISTS Caisses (id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL, est_ouverte INTEGER DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS Sessions_Caisse (id INTEGER PRIMARY KEY AUTOINCREMENT, utilisateur_id INTEGER, caisse_id INTEGER, date_ouverture TEXT, date_fermeture TEXT, fond_initial REAL, statut TEXT DEFAULT 'Ouverte', FOREIGN KEY (utilisateur_id) REFERENCES Utilisateurs (id), FOREIGN KEY (caisse_id) REFERENCES Caisses (id));
     """)
+
+# --- 2. CRÉATION / MISE À JOUR DU COMPTE ADMIN ---
+    # 1. On cherche si "Admin" existe déjà. Si oui, on le force en "Super Admin"
+    cursor.execute("SELECT id FROM Utilisateurs WHERE nom = 'Admin' OR nom = 'Super Admin'")
+    if cursor.fetchone():
+        cursor.execute("UPDATE Utilisateurs SET role = 'Super Admin' WHERE nom = 'Admin' OR nom = 'Super Admin'")
+    else:
+        # S'il n'existe pas du tout, on le crée avec le code 0000
+        cursor.execute("INSERT INTO Utilisateurs (nom, pin, role) VALUES ('Admin', '0000', 'Super Admin')")
+        
+    # On s'assure d'avoir des caisses
+    cursor.execute("SELECT COUNT(*) FROM Caisses")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO Caisses (nom, est_ouverte) VALUES ('Caisse Principale', 0)")
+        cursor.execute("INSERT INTO Caisses (nom, est_ouverte) VALUES ('Caisse Secondaire', 0)")
+        
+    conn.commit()
 
     cursor.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Depenses_Caisse'")
     if cursor.fetchone()[0] == 1:
@@ -127,9 +149,14 @@ def sauvegarder_ticket_local(texte_ticket, nom_fichier_export="ticket_print.txt"
 def convert_df_to_csv(df):
     return df.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
 
-conn_fmt = get_connection()
-df_params_global = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id = 1", conn_fmt)
-conn_fmt.close()
+# --- LECTURE SÉCURISÉE DES PARAMÈTRES GLOBAUX ---
+try:
+    conn_fmt = get_connection()
+    df_params_global = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id = 1", conn_fmt)
+    conn_fmt.close()
+except Exception as e:
+    # Si la base est verrouillée, on charge un DataFrame vide pour éviter le crash
+    df_params_global = pd.DataFrame()
 
 if not df_params_global.empty:
     sys_format_date = df_params_global.iloc[0].get('format_date', '%Y-%m-%d %H:%M')
@@ -137,9 +164,11 @@ if not df_params_global.empty:
     sys_format_prix = str(df_params_global.iloc[0].get('format_prix', ','))
     sys_decimal_prix = str(df_params_global.iloc[0].get('decimal_prix', '0'))
     sys_heure_fin = int(df_params_global.iloc[0].get('heure_fin_service', 5))
-    sys_monnaie = str(df_params_global.iloc[0].get('monnaie', 'FCFA')) # NOUVEAU
+    sys_monnaie = str(df_params_global.iloc[0].get('monnaie', 'FCFA'))
 else:
+    # Valeurs par défaut de secours
     sys_format_date, sys_format_qte, sys_format_prix, sys_decimal_prix, sys_heure_fin, sys_monnaie = '%Y-%m-%d %H:%M', '0', ',', '0', 5, 'FCFA'
+# -------------------------------------------------
 
 def fmt_prix(val):
     if pd.isna(val): val = 0.0
@@ -186,93 +215,298 @@ if "paiements_credit" not in st.session_state: st.session_state.paiements_credit
 if "pourboire_credit" not in st.session_state: st.session_state.pourboire_credit = 0.0
 if "credit_ticket_id" not in st.session_state: st.session_state.credit_ticket_id = None
 
-if st.session_state.utilisateur is None:
-    st.markdown("### 🔒 Connexion au Système")
-    conn = get_connection()
-    df_users = pd.read_sql_query("SELECT id, nom, role FROM Utilisateurs ORDER BY nom", conn)
-    conn.close()
+# =====================================================================
+# 1. SYSTÈME DE SÉCURITÉ : LOGIN ET OUVERTURE DE CAISSE
+# =====================================================================
 
-    col_l1, col_l2, col_l3 = st.columns([1, 2, 1])
-    with col_l2:
-        st.info("💡 **Code PIN Admin par défaut : 1234**")
-        with st.form("form_login"):
-            dict_users = dict(zip(df_users["nom"], df_users["id"]))
-            user_choisi = st.selectbox("Qui êtes-vous ?", options=list(dict_users.keys()))
-            pin_saisi = st.text_input("Code PIN", type="password")
-            if st.form_submit_button("Se connecter", type="primary"):
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT id, nom, role FROM Utilisateurs WHERE id = ? AND pin = ?", (dict_users[user_choisi], pin_saisi))
-                user_verif = cursor.fetchone()
-                conn.close()
-                if user_verif:
-                    st.session_state.utilisateur = {"id": user_verif[0], "nom": user_verif[1], "role": user_verif[2]}
+# =====================================================================
+# 1. SYSTÈME DE SÉCURITÉ : LOGIN ET OUVERTURE DE CAISSE
+# =====================================================================
+conn = get_connection() 
+
+# --- MISE A JOUR BASE DE DONNEES (Assignation Caisse) ---
+cursor = conn.cursor()
+cursor.execute("PRAGMA table_info(Utilisateurs)")
+if "caisse_id" not in [c[1] for c in cursor.fetchall()]:
+    cursor.execute("ALTER TABLE Utilisateurs ADD COLUMN caisse_id INTEGER REFERENCES Caisses(id)")
+    conn.commit()
+# --------------------------------------------------------
+
+if "utilisateur" not in st.session_state:
+    st.session_state.utilisateur = None
+if "mode_backoffice" not in st.session_state:
+    st.session_state.mode_backoffice = False
+
+if not st.session_state.utilisateur:
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 1.5, 1])
+    with col2:
+        st.markdown(f"<h2 style='text-align: center; color: #0288d1;'>🔐 Connexion au Système</h2>", unsafe_allow_html=True)
+        with st.form("login_form"):
+            pin_input = st.text_input("🔑 Code PIN", type="password", placeholder="Entrez votre code secret...")
+            if st.form_submit_button("Se connecter", type="primary", use_container_width=True):
+                cursor.execute("SELECT id, nom, role, caisse_id FROM Utilisateurs WHERE pin = ?", (pin_input,))
+                user = cursor.fetchone()
+                if user:
+                    st.session_state.utilisateur = {"id": user[0], "nom": user[1], "role": user[2], "caisse_id": user[3]}
                     st.rerun()
-                else: st.error("❌ Code PIN incorrect.")
+                else:
+                    st.error("❌ Code PIN incorrect.")
     st.stop()
 
+# --- B. L'ÉCRAN D'OUVERTURE DE CAISSE ---
+cursor = conn.cursor()
+cursor.execute("SELECT id, caisse_id FROM Sessions_Caisse WHERE utilisateur_id = ? AND statut = 'Ouverte'", (st.session_state.utilisateur["id"],))
+session_en_cours = cursor.fetchone()
+
+if not session_en_cours and not st.session_state.mode_backoffice:
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown(f"<h3 style='text-align: center; color: #0288d1;'>🏪 Ouverture de Caisse</h3>", unsafe_allow_html=True)
+        st.markdown(f"<p style='text-align: center;'>Bienvenue <b>{st.session_state.utilisateur['nom']}</b>.</p>", unsafe_allow_html=True)
+        
+        role_u = st.session_state.utilisateur["role"]
+        caisse_assignee_id = st.session_state.utilisateur["caisse_id"]
+        monnaie_aff = sys_monnaie if 'sys_monnaie' in globals() else 'FCFA'
+        
+        # --- NOUVEAU : RECHERCHE DU FOND DE CAISSE DEJA SAISI AUJOURD'HUI ---
+        sys_heure_fin_val = sys_heure_fin if 'sys_heure_fin' in globals() else 5
+        date_explo = (datetime.datetime.now() - datetime.timedelta(hours=sys_heure_fin_val)).strftime('%Y-%m-%d')
+        
+        cursor.execute(f"SELECT id, montant FROM Mouvements_Caisse WHERE type_mouvement = 'Fond de Caisse' AND utilisateur_id = ? AND date(date_mvt, '-{sys_heure_fin_val} hours') = ? ORDER BY id DESC LIMIT 1", (st.session_state.utilisateur["id"], date_explo))
+        res_fond = cursor.fetchone()
+        fond_id_existant = res_fond[0] if res_fond else None
+        fond_defaut = float(res_fond[1]) if res_fond else 0.0
+        
+        if fond_defaut > 0:
+            st.info(f"💡 Vous avez déjà déclaré un fond de caisse de **{fmt_prix(fond_defaut)} {monnaie_aff}** aujourd'hui. Il a été récupéré automatiquement.")
+
+        # --- LOGIQUE CAISSIER (Caisse strictement dédiée) ---
+        if role_u == "Caissier":
+            if not caisse_assignee_id:
+                st.error("⛔ Aucune caisse ne vous a été assignée. Veuillez contacter votre Manager.")
+            else:
+                df_caisse = pd.read_sql_query(f"SELECT id, nom, est_ouverte FROM Caisses WHERE id = {caisse_assignee_id}", conn)
+                if df_caisse.empty:
+                    st.error("Votre caisse assignée est introuvable dans le système.")
+                elif df_caisse.iloc[0]['est_ouverte'] == 1:
+                    st.error(f"⛔ Votre poste ({df_caisse.iloc[0]['nom']}) est verrouillé ou occupé par une autre session.")
+                else:
+                    st.success(f"📍 Poste de travail assigné : **{df_caisse.iloc[0]['nom']}**")
+                    with st.form("form_ouverture_caisse"):
+                        # Le champ prend la valeur par défaut trouvée
+                        fond_caisse = st.number_input(f"Fond de caisse initial ({monnaie_aff})", min_value=0.0, value=fond_defaut, step=1000.0)
+                        
+                        if st.form_submit_button("🔓 Ouvrir MA caisse", type="primary", use_container_width=True):
+                            dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            cursor.execute("UPDATE Caisses SET est_ouverte = 1 WHERE id = ?", (caisse_assignee_id,))
+                            cursor.execute("INSERT INTO Sessions_Caisse (utilisateur_id, caisse_id, date_ouverture, fond_initial, statut) VALUES (?, ?, ?, ?, 'Ouverte')", (st.session_state.utilisateur["id"], caisse_assignee_id, dt_now, fond_caisse))
+                            
+                            # Si un fond existait déjà, on le met à jour pour éviter les doublons au Z de caisse
+                            if fond_id_existant:
+                                if fond_caisse != fond_defaut:
+                                    cursor.execute("UPDATE Mouvements_Caisse SET montant = ?, date_mvt = ? WHERE id = ?", (fond_caisse, dt_now, fond_id_existant))
+                            # Sinon on le crée
+                            elif fond_caisse > 0:
+                                cursor.execute("INSERT INTO Mouvements_Caisse (type_mouvement, motif, montant, utilisateur_id, date_mvt) VALUES ('Fond de Caisse', ?, ?, ?, ?)", (f"Ouverture {df_caisse.iloc[0]['nom']}", fond_caisse, st.session_state.utilisateur["id"], dt_now))
+                            
+                            conn.commit()
+                            st.rerun()
+                            
+        # --- LOGIQUE ADMIN / MANAGER (Choix libre ou Back-Office) ---
+        else:
+            df_caisses_libres = pd.read_sql_query("SELECT id, nom FROM Caisses WHERE est_ouverte = 0", conn)
+            if df_caisses_libres.empty:
+                st.warning("⚠️ Toutes les caisses sont occupées. Accès Back-Office uniquement.")
+            else:
+                with st.form("form_ouverture_caisse"):
+                    caisse_dict = dict(zip(df_caisses_libres["nom"], df_caisses_libres["id"]))
+                    idx_default = 0
+                    if caisse_assignee_id:
+                        nom_assignee = pd.read_sql_query(f"SELECT nom FROM Caisses WHERE id = {caisse_assignee_id}", conn)
+                        if not nom_assignee.empty and nom_assignee.iloc[0]['nom'] in caisse_dict:
+                            idx_default = list(caisse_dict.keys()).index(nom_assignee.iloc[0]['nom'])
+                            
+                    choix_caisse = st.selectbox("Sélectionnez un poste :", options=list(caisse_dict.keys()), index=idx_default)
+                    
+                    # Le champ prend la valeur par défaut trouvée
+                    fond_caisse = st.number_input(f"Fond de caisse initial ({monnaie_aff})", min_value=0.0, value=fond_defaut, step=1000.0)
+                    
+                    if st.form_submit_button("🔓 Ouvrir cette caisse", type="primary", use_container_width=True):
+                        caisse_id = caisse_dict[choix_caisse]
+                        dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        cursor.execute("UPDATE Caisses SET est_ouverte = 1 WHERE id = ?", (caisse_id,))
+                        cursor.execute("INSERT INTO Sessions_Caisse (utilisateur_id, caisse_id, date_ouverture, fond_initial, statut) VALUES (?, ?, ?, ?, 'Ouverte')", (st.session_state.utilisateur["id"], caisse_id, dt_now, fond_caisse))
+                        
+                        # Pareil pour l'Admin, on empêche les doublons
+                        if fond_id_existant:
+                            if fond_caisse != fond_defaut:
+                                cursor.execute("UPDATE Mouvements_Caisse SET montant = ?, date_mvt = ? WHERE id = ?", (fond_caisse, dt_now, fond_id_existant))
+                        elif fond_caisse > 0:
+                            cursor.execute("INSERT INTO Mouvements_Caisse (type_mouvement, motif, montant, utilisateur_id, date_mvt) VALUES ('Fond de Caisse', ?, ?, ?, ?)", (f"Ouverture {choix_caisse}", fond_caisse, st.session_state.utilisateur["id"], dt_now))
+                        
+                        conn.commit()
+                        st.rerun()
+                        
+            st.divider()
+            if st.button("👔 Accéder au Back-Office (Sans caisse)", use_container_width=True):
+                st.session_state.mode_backoffice = True
+                st.session_state.caisse_id = None
+                st.session_state.session_id = None
+                st.session_state.caisse_nom = "Mode Back-Office"
+                st.rerun()
+                
+        st.divider()
+        if st.button("🚪 Se déconnecter", use_container_width=True):
+            st.session_state.utilisateur = None
+            st.rerun()
+            
+    st.stop()
+    
+elif session_en_cours:
+    st.session_state.session_id = session_en_cours[0]
+    st.session_state.caisse_id = session_en_cours[1]
+    st.session_state.mode_backoffice = False
+    cursor.execute("SELECT nom FROM Caisses WHERE id = ?", (st.session_state.caisse_id,))
+    res_c_nom = cursor.fetchone()
+    st.session_state.caisse_nom = res_c_nom[0] if res_c_nom else "Caisse Inconnue"
+
+# =====================================================================
+# 2. MENU PRINCIPAL ET BARRE LATÉRALE
+# =====================================================================
 role_actif = st.session_state.utilisateur["role"]
+
 st.sidebar.markdown(f"👤 **{st.session_state.utilisateur['nom']}** ({role_actif})")
-st.sidebar.info(f"🕒 **Horloge Système**\n\n{datetime.datetime.now().strftime(sys_format_date)}")
-if st.sidebar.button("Se déconnecter"): st.session_state.utilisateur = None; st.rerun()
+st.sidebar.markdown(f"🏪 **{st.session_state.caisse_nom}**")
+st.sidebar.info(f"🕒 **Horloge Système**\n\n{datetime.datetime.now().strftime(sys_format_date if 'sys_format_date' in globals() else '%Y-%m-%d %H:%M')}")
+
+# Si on est en caisse, on affiche "Fermer la caisse". Si on est en Back-Office, on affiche "Se déconnecter"
+if not st.session_state.mode_backoffice:
+    if st.sidebar.button("🔒 Fermer la caisse & Quitter", type="primary", use_container_width=True):
+        cursor = conn.cursor()
+        dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("UPDATE Caisses SET est_ouverte = 0 WHERE id = ?", (st.session_state.caisse_id,))
+        cursor.execute("UPDATE Sessions_Caisse SET date_fermeture = ?, statut = 'Fermée' WHERE id = ?", (dt_now, st.session_state.session_id))
+        conn.commit()
+        st.session_state.utilisateur = None
+        st.session_state.mode_backoffice = False
+        st.rerun()
+else:
+    if st.sidebar.button("🚪 Se déconnecter du Back-Office", use_container_width=True):
+        st.session_state.utilisateur = None
+        st.session_state.mode_backoffice = False
+        st.rerun()
+
 st.sidebar.divider()
 
-if role_actif == "Manager":
+if role_actif in ["Super Admin", "Manager"]:
     menu_options = ["Prise de Commande", "Tableau de Bord", "Mouvements Caisse", "Achats (Fournisseurs)", "Catalogue Articles", "Stocks & Mouvements", "Clients (CRM)", "Paramètres", "Équipe (Utilisateurs)"]
 else:
-    menu_options = ["Prise de Commande", "Mouvements Caisse", "Clients (CRM)"]
+    # NOUVEAU : On ajoute "Tableau de Bord" pour le Caissier
+    menu_options = ["Prise de Commande", "Tableau de Bord", "Mouvements Caisse", "Clients (CRM)"]
+
 
 menu = st.sidebar.radio("Navigation", menu_options)
+
+# =====================================================================
+# Ensuite vient votre code normal : if menu == "Prise de Commande": ...
+# =====================================================================    
 conn = get_connection()
 
 if menu == "Équipe (Utilisateurs)":
     st.markdown("### 👥 Gestion du Personnel")
+    
+    # --- NOUVEAU : Récupérer les caisses pour l'assignation ---
+    df_caisses_assign = pd.read_sql_query("SELECT id, nom FROM Caisses ORDER BY nom", conn)
+    dict_c_assign = {"-- Aucune (Volant / Back-Office) --": None}
+    for _, r in df_caisses_assign.iterrows():
+        dict_c_assign[r['nom']] = r['id']
+    # ----------------------------------------------------------
+
     col1, col2 = st.columns([1, 2])
+    
     with col1:
         st.subheader("Créer un compte")
         with st.form("form_user", clear_on_submit=True):
             nom_u = st.text_input("Nom de l'employé")
             pin_u = st.text_input("Code PIN de connexion", type="password")
-            role_u = st.selectbox("Rôle", ["Manager", "Caissier"])
+            
+            if role_actif == "Super Admin":
+                options_roles = ["Caissier", "Manager", "Super Admin"]
+            else:
+                options_roles = ["Caissier", "Manager"]
+                
+            role_u = st.selectbox("Rôle", options_roles)
+            
+            # NOUVEAU : Choix de la caisse dédiée
+            caisse_u = st.selectbox("Assigner à la Caisse :", list(dict_c_assign.keys()))
+            
             if st.form_submit_button("Ajouter l'utilisateur") and nom_u and pin_u:
                 cursor = conn.cursor()
                 try:
-                    cursor.execute("INSERT INTO Utilisateurs (nom, pin, role) VALUES (?, ?, ?)", (nom_u, pin_u, role_u))
+                    cursor.execute("INSERT INTO Utilisateurs (nom, pin, role, caisse_id) VALUES (?, ?, ?, ?)", (nom_u, pin_u, role_u, dict_c_assign[caisse_u]))
                     conn.commit()
                     st.success(f"Utilisateur {nom_u} créé !"); st.rerun()
-                except sqlite3.IntegrityError: st.error("Ce nom ou ce code PIN est déjà utilisé !")
+                except sqlite3.IntegrityError: 
+                    st.error("Ce nom ou ce code PIN est déjà utilisé !")
+
     with col2:
         st.subheader("Liste et Gestion de l'équipe")
-        df_users_liste = pd.read_sql_query("SELECT id, nom, role FROM Utilisateurs ORDER BY nom", conn)
-        st.dataframe(df_users_liste.rename(columns={"nom": "Nom", "role": "Rôle"}), use_container_width=True, hide_index=True)
+        df_users_liste = pd.read_sql_query("""
+            SELECT u.id, u.nom, u.role, COALESCE(c.nom, '-- Aucune --') as caisse_assignee 
+            FROM Utilisateurs u 
+            LEFT JOIN Caisses c ON u.caisse_id = c.id 
+            ORDER BY u.nom
+        """, conn)
+        
+        df_aff_users = df_users_liste.rename(columns={"nom": "Nom", "role": "Rôle", "caisse_assignee": "Caisse Dédiée"})
+        st.dataframe(df_aff_users[["Nom", "Rôle", "Caisse Dédiée"]], use_container_width=True, hide_index=True)
+        
         st.divider()
+        
         if not df_users_liste.empty:
             dict_u = dict(zip(df_users_liste["nom"], df_users_liste["id"]))
             choix_u = st.selectbox("Sélectionnez un employé à modifier :", options=list(dict_u.keys()))
             id_u = int(dict_u[choix_u])
-            role_actuel_u = df_users_liste[df_users_liste["id"] == id_u]["role"].iloc[0]
+            
+            info_u = df_users_liste[df_users_liste["id"] == id_u].iloc[0]
+            role_actuel_u = info_u["role"]
+            caisse_actuelle = info_u["caisse_assignee"]
 
             with st.expander("✏️ Modifier cet employé"):
                 with st.form("edit_user"):
                     e_nom = st.text_input("Nouveau nom", value=choix_u)
-                    e_pin = st.text_input("Nouveau Code PIN (Laissez vide)", type="password")
-                    roles_dispos = ["Manager", "Caissier"]
+                    e_pin = st.text_input("Nouveau Code PIN (Laissez vide pour garder l'ancien)", type="password")
+                    
+                    roles_dispos = ["Manager", "Caissier", "Super Admin"] if role_actif == "Super Admin" else ["Manager", "Caissier"]
                     idx_role = roles_dispos.index(role_actuel_u) if role_actuel_u in roles_dispos else 0
                     e_role = st.selectbox("Rôle", roles_dispos, index=idx_role)
+                    
+                    idx_c = list(dict_c_assign.keys()).index(caisse_actuelle) if caisse_actuelle in dict_c_assign else 0
+                    e_caisse = st.selectbox("Assigner à la Caisse :", list(dict_c_assign.keys()), index=idx_c)
+                    
                     if st.form_submit_button("Enregistrer les modifications"):
                         cursor = conn.cursor()
                         try:
-                            if e_pin.strip(): cursor.execute("UPDATE Utilisateurs SET nom=?, pin=?, role=? WHERE id=?", (e_nom, e_pin, e_role, id_u))
-                            else: cursor.execute("UPDATE Utilisateurs SET nom=?, role=? WHERE id=?", (e_nom, e_role, id_u))
+                            if e_pin.strip(): 
+                                cursor.execute("UPDATE Utilisateurs SET nom=?, pin=?, role=?, caisse_id=? WHERE id=?", (e_nom, e_pin, e_role, dict_c_assign[e_caisse], id_u))
+                            else: 
+                                cursor.execute("UPDATE Utilisateurs SET nom=?, role=?, caisse_id=? WHERE id=?", (e_nom, e_role, dict_c_assign[e_caisse], id_u))
                             conn.commit()
                             st.success("Utilisateur mis à jour !"); st.rerun()
-                        except sqlite3.IntegrityError: st.error("Ce nom ou PIN existe déjà !")
+                        except sqlite3.IntegrityError: 
+                            st.error("Ce nom ou PIN existe déjà !")
 
             with st.expander("🗑️ Supprimer cet employé"):
                 with st.form("del_user"):
                     if st.form_submit_button("Confirmer la suppression"):
-                        if choix_u == "Admin": st.error("❌ Impossible de supprimer l'administrateur par défaut.")
-                        else: cursor = conn.cursor(); cursor.execute("DELETE FROM Utilisateurs WHERE id = ?", (id_u,)); conn.commit(); st.rerun()
+                        if choix_u in ["Admin", "Super Admin"] and id_u == st.session_state.utilisateur["id"]: 
+                            st.error("❌ Impossible de se supprimer soi-même.")
+                        elif role_actif == "Manager" and role_actuel_u == "Super Admin":
+                            st.error("❌ Le Manager ne peut pas supprimer un Super Admin.")
+                        else: 
+                            cursor = conn.cursor(); cursor.execute("DELETE FROM Utilisateurs WHERE id = ?", (id_u,)); conn.commit(); st.rerun()
 
 elif menu == "Mouvements Caisse":
     st.markdown("### 💸 Mouvements de Caisse")
@@ -369,10 +603,27 @@ elif menu == "Mouvements Caisse":
 elif menu == "Tableau de Bord":
     st.markdown("### 📊 Tableau de Bord & Analyses")
     
-    # --- Sélecteur global pour tout le tableau de bord ---
-    col_date, _ = st.columns([2, 2])
+    # --- Sélecteur de Date et Filtre par Caissier ---
+    col_date, col_filtre = st.columns([2, 2])
     date_defaut = (datetime.datetime.now() - datetime.timedelta(hours=sys_heure_fin)).date()
     dates_selectionnees = col_date.date_input("📅 Choisir la période d'analyse :", value=[date_defaut, date_defaut])
+    
+    filtre_user_id = None
+    if role_actif in ["Super Admin", "Manager"]:
+        df_users = pd.read_sql_query("SELECT id, nom FROM Utilisateurs ORDER BY nom", conn)
+        options_users = {"Toutes les caisses (Global)": None}
+        for _, row in df_users.iterrows():
+            options_users[row["nom"]] = row["id"]
+            
+        choix_filtre = col_filtre.selectbox("👤 Filtrer par Caissier :", list(options_users.keys()))
+        filtre_user_id = options_users[choix_filtre]
+        lbl_filtre_print = f" - Caissier : {choix_filtre}" if filtre_user_id else ""
+    else:
+        # Le caissier est bloqué sur ses propres statistiques
+        col_filtre.info(f"👤 Filtré sur votre session ({st.session_state.utilisateur['nom']})")
+        filtre_user_id = st.session_state.utilisateur["id"]
+        lbl_filtre_print = f" - Caissier : {st.session_state.utilisateur['nom']}"
+
     st.divider()
     
     if len(dates_selectionnees) == 2:
@@ -383,11 +634,11 @@ elif menu == "Tableau de Bord":
         date_debut = date_fin = date_defaut
         
     if date_debut == date_fin:
-        titre_periode = date_debut.strftime('%d/%m/%Y')
+        titre_periode = date_debut.strftime('%d/%m/%Y') + lbl_filtre_print
         fichier_periode = date_debut.strftime('%Y-%m-%d')
         lbl_periode = "(Jour)"
     else:
-        titre_periode = f"du {date_debut.strftime('%d/%m/%Y')} au {date_fin.strftime('%d/%m/%Y')}"
+        titre_periode = f"du {date_debut.strftime('%d/%m/%Y')} au {date_fin.strftime('%d/%m/%Y')}" + lbl_filtre_print
         fichier_periode = f"{date_debut.strftime('%Y%m%d')}_au_{date_fin.strftime('%Y%m%d')}"
         lbl_periode = "(Période)"
         
@@ -395,7 +646,10 @@ elif menu == "Tableau de Bord":
     tab_z, tab_depenses, tab_stats = st.tabs(["📑 Rapport Z de Caisse", "💸 Dépenses & Tiroir-Caisse", "📈 Statistiques & Palmarès"])
     
     with tab_z:
-        df_mvt = pd.read_sql_query("SELECT type_mouvement, montant, date_mvt FROM Mouvements_Caisse", conn)
+        query_mvt = "SELECT type_mouvement, montant, date_mvt FROM Mouvements_Caisse"
+        if filtre_user_id: query_mvt += f" WHERE utilisateur_id = {filtre_user_id}"
+        df_mvt = pd.read_sql_query(query_mvt, conn)
+        
         if not df_mvt.empty:
             df_mvt['Date_Exploitation'] = (pd.to_datetime(df_mvt['date_mvt']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
             df_mvt_today = df_mvt[(df_mvt['Date_Exploitation'] >= date_debut) & (df_mvt['Date_Exploitation'] <= date_fin)]
@@ -405,10 +659,13 @@ elif menu == "Tableau de Bord":
         else:
             fond_caisse, entrees_mvt, sorties_mvt = 0.0, 0.0, 0.0
             
-        # MODIFICATION ICI : On utilise NOT LIKE pour exclure TOUTES les variantes de crédits (y compris les réglés)
-        df_paies = pd.read_sql_query("SELECT p.montant, p.methode, p.date_paiement, c.date_creation FROM Paiements_Ticket p JOIN Commandes c ON p.commande_id = c.id WHERE p.methode NOT LIKE '%À Crédit%' AND p.methode NOT LIKE '%Note de Chambre%' AND c.statut != 'Annulée'", conn)
+        query_paies = "SELECT p.montant, p.methode, p.date_paiement, c.date_creation FROM Paiements_Ticket p JOIN Commandes c ON p.commande_id = c.id WHERE p.methode NOT LIKE '%À Crédit%' AND p.methode NOT LIKE '%Note de Chambre%' AND c.statut != 'Annulée'"
+        if filtre_user_id: query_paies += f" AND c.utilisateur_id = {filtre_user_id}"
+        df_paies = pd.read_sql_query(query_paies, conn)
         
-        df_cmd = pd.read_sql_query("SELECT id, total, pourboire, date_creation, statut FROM Commandes WHERE statut IN ('Payée', 'À Crédit')", conn)
+        query_cmd = "SELECT id, total, pourboire, date_creation, statut FROM Commandes WHERE statut IN ('Payée', 'À Crédit')"
+        if filtre_user_id: query_cmd += f" AND utilisateur_id = {filtre_user_id}"
+        df_cmd = pd.read_sql_query(query_cmd, conn)
         
         ventes_especes_jour = 0.0
         reglements_anciens_especes = 0.0
@@ -483,7 +740,11 @@ elif menu == "Tableau de Bord":
         
         st.divider()
         
-        df_tous_tickets = pd.read_sql_query("SELECT id as 'N°', date_creation as 'Heure', type_commande as 'Type', statut as 'Statut', COALESCE(methode_paiement, '-') as 'Paiement', total as 'Total' FROM Commandes WHERE statut != 'En attente' ORDER BY id DESC", conn)
+        query_tous_tickets = "SELECT id as 'N°', date_creation as 'Heure', type_commande as 'Type', statut as 'Statut', COALESCE(methode_paiement, '-') as 'Paiement', total as 'Total' FROM Commandes WHERE statut != 'En attente'"
+        if filtre_user_id: query_tous_tickets += f" AND utilisateur_id = {filtre_user_id}"
+        query_tous_tickets += " ORDER BY id DESC"
+        
+        df_tous_tickets = pd.read_sql_query(query_tous_tickets, conn)
         df_tous_tickets['Date_Exploitation'] = (pd.to_datetime(df_tous_tickets['Heure']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
         tickets_du_jour = df_tous_tickets[(df_tous_tickets['Date_Exploitation'] >= date_debut) & (df_tous_tickets['Date_Exploitation'] <= date_fin)].copy()
         
@@ -645,7 +906,8 @@ elif menu == "Tableau de Bord":
 
 elif menu == "Paramètres":
     st.markdown("### ⚙️ Paramètres du Système")
-    tab_resto, tab_paiement, tab_zones, tab_formats, tab_backup = st.tabs(["1. Infos Commerce", "2. Paiement", "3. Zones Livraison", "4. Formats", "5. Sauvegarde"])
+    tab_resto, tab_paiement, tab_zones, tab_formats, tab_backup, tab_caisses = st.tabs(["1. Infos Commerce", "2. Paiement", "3. Zones Livraison", "4. Formats", "5. Sauvegarde", "6. Terminaux (Caisses)"])
+
     with tab_resto:
         # C'est cette ligne qui manquait pour définir 'param' !
         param = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
@@ -758,6 +1020,72 @@ elif menu == "Paramètres":
                     with open(db_path, "wb") as f: f.write(fichier_upload.getbuffer())
                     st.success("✅ Restauration réussie !"); st.rerun()
                 except Exception as e: st.error(f"Erreur lors de la restauration : {e}")
+
+    with tab_caisses:
+        st.markdown("### 🖥️ Gestion des Terminaux de Caisse")
+        st.info("💡 Ajoutez, renommez ou supprimez les postes de travail physiques de votre établissement.")
+        
+        c_add, c_gest = st.columns(2)
+        
+        with c_add:
+            with st.form("form_add_caisse", clear_on_submit=True):
+                st.markdown("#### ➕ Nouvelle Caisse")
+                nom_nouvelle_caisse = st.text_input("Nom de la caisse (ex: Caisse VIP, Drive)")
+                
+                if st.form_submit_button("Ajouter ce terminal", type="primary"):
+                    if nom_nouvelle_caisse:
+                        cursor = conn.cursor()
+                        cursor.execute("INSERT INTO Caisses (nom, est_ouverte) VALUES (?, 0)", (nom_nouvelle_caisse,))
+                        conn.commit()
+                        st.success(f"Caisse '{nom_nouvelle_caisse}' ajoutée avec succès !")
+                        st.rerun()
+                    else:
+                        st.error("Le nom est obligatoire.")
+                        
+        with c_gest:
+            st.markdown("#### ⚙️ Terminaux Existants")
+            df_caisses = pd.read_sql_query("SELECT id, nom, est_ouverte FROM Caisses ORDER BY nom", conn)
+            
+            if not df_caisses.empty:
+                dict_caisses = dict(zip(df_caisses["nom"], df_caisses["id"]))
+                choix_caisse_gest = st.selectbox("Sélectionnez une caisse à gérer :", options=list(dict_caisses.keys()))
+                id_caisse_gest = dict_caisses[choix_caisse_gest]
+                etat_caisse = df_caisses[df_caisses["id"] == id_caisse_gest].iloc[0]["est_ouverte"]
+                
+                if etat_caisse == 1:
+                    st.warning("🔒 Cette caisse est actuellement occupée par un caissier.")
+                    if st.button("🔓 Forcer le déverrouillage", type="primary"):
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE Caisses SET est_ouverte = 0 WHERE id = ?", (id_caisse_gest,))
+                        cursor.execute("UPDATE Sessions_Caisse SET statut = 'Fermée (Forcée)', date_fermeture = ? WHERE caisse_id = ? AND statut = 'Ouverte'", (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), id_caisse_gest))
+                        conn.commit()
+                        st.success("Caisse débloquée !")
+                        st.rerun()
+                else:
+                    st.success("✅ Cette caisse est libre.")
+                    with st.expander("✏️ Modifier / 🗑️ Supprimer", expanded=True):
+                        with st.form("edit_caisse"):
+                            nouveau_nom_caisse = st.text_input("Nouveau nom", value=choix_caisse_gest)
+                            
+                            c_btn1, c_btn2 = st.columns(2)
+                            if c_btn1.form_submit_button("Enregistrer", type="primary"):
+                                cursor = conn.cursor()
+                                cursor.execute("UPDATE Caisses SET nom = ? WHERE id = ?", (nouveau_nom_caisse, id_caisse_gest))
+                                conn.commit()
+                                st.success("Nom mis à jour !")
+                                st.rerun()
+                                
+                            if c_btn2.form_submit_button("Supprimer (Forcer)"):
+                                cursor = conn.cursor()
+                                # On nettoie d'abord l'historique des sessions fantômes de cette caisse
+                                cursor.execute("DELETE FROM Sessions_Caisse WHERE caisse_id = ?", (id_caisse_gest,))
+                                # Puis on supprime la caisse elle-même
+                                cursor.execute("DELETE FROM Caisses WHERE id = ?", (id_caisse_gest,))
+                                conn.commit()
+                                st.success("Caisse et historique de sessions supprimés !")
+                                st.rerun()
+            else:
+                st.info("Aucune caisse configurée.")
 
 elif menu == "Catalogue Articles":
     st.markdown("### 📦 Catalogue des Articles (Achats & Ventes)")
@@ -1165,7 +1493,7 @@ elif menu == "Catalogue Articles":
                 st.error(f"❌ Erreur lors de l'importation : {e}")
 
     with tab_admin:
-        if role_actif == "Manager":
+        if role_actif in ["Super Admin", "Manager"]:
             st.warning("⚠️ **ATTENTION - ACTION IRRÉVERSIBLE**\n\nCette action va supprimer **l'intégralité de vos Catégories, Sous-Catégories et Articles**.\nPour éviter toute corruption de la base de données, cela entraînera également **la remise à zéro de l'historique des Ventes et des Stocks**.")
             with st.form("form_reset_catalogue"):
                 st.write("Pour confirmer, veuillez saisir votre code PIN administrateur :")
@@ -1193,162 +1521,217 @@ elif menu == "Catalogue Articles":
             st.error("Accès refusé : Réservé à l'administrateur.")
 
 elif menu == "Achats (Fournisseurs)":
+    # --- VÉRIFICATION ET CRÉATION FORCÉE DES TABLES ---
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Fournisseurs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nom TEXT NOT NULL,
+            telephone TEXT,
+            adresse TEXT
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Factures_Achat (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fournisseur_id INTEGER,
+            reference_facture TEXT,
+            date_facture TEXT,
+            montant_total REAL,
+            date_saisie TEXT,
+            FOREIGN KEY (fournisseur_id) REFERENCES Fournisseurs (id)
+        )
+    ''')
+    conn.commit()
+    # --------------------------------------------------
+
     st.markdown("### 🛒 Achats Fournisseurs")
+    
     tab_fourn, tab_achats, tab_hist_achats = st.tabs(["1. Fournisseurs", "2. Saisie d'une Facture", "3. Historique Achats"])
     
+    
     with tab_fourn:
-        col_f1, col_f2 = st.columns([1, 1.5])
-        with col_f1:
-            st.markdown("#### Ajouter un Fournisseur")
-            with st.form("form_add_fourn", clear_on_submit=True):
-                nom_f = st.text_input("Nom du Fournisseur *")
-                tel_f = st.text_input("Téléphone")
-                adr_f = st.text_area("Adresse / Notes")
-                if st.form_submit_button("Enregistrer") and nom_f:
-                    cursor = conn.cursor(); cursor.execute("INSERT INTO Fournisseurs (nom, telephone, adresse) VALUES (?, ?, ?)", (nom_f, tel_f, adr_f)); conn.commit(); st.rerun()
-        with col_f2:
-            st.markdown("#### Liste des Fournisseurs")
-            df_fournisseurs = pd.read_sql_query("SELECT * FROM Fournisseurs ORDER BY nom", conn)
-            if not df_fournisseurs.empty:
-                st.dataframe(df_fournisseurs[['id', 'nom', 'telephone', 'adresse']], use_container_width=True, hide_index=True)
-                dict_fourn = dict(zip(df_fournisseurs["nom"], df_fournisseurs["id"]))
-                choix_f_edit = st.selectbox("Modifier / Supprimer un fournisseur :", options=list(dict_fourn.keys()))
-                id_f_edit = dict_fourn[choix_f_edit]
-                with st.expander("🛠️ Gérer ce fournisseur"):
-                    f_info = df_fournisseurs[df_fournisseurs['id'] == id_f_edit].iloc[0]
-                    with st.form("form_edit_fourn"):
-                        e_nom_f = st.text_input("Nom", value=f_info['nom'])
-                        e_tel_f = st.text_input("Téléphone", value=f_info['telephone'] if f_info['telephone'] else "")
-                        e_adr_f = st.text_input("Adresse", value=f_info['adresse'] if f_info['adresse'] else "")
-                        if st.form_submit_button("Mettre à jour"): cursor = conn.cursor(); cursor.execute("UPDATE Fournisseurs SET nom=?, telephone=?, adresse=? WHERE id=?", (e_nom_f, e_tel_f, e_adr_f, id_f_edit)); conn.commit(); st.rerun()
-                        if st.form_submit_button("❌ Supprimer"):
-                            cursor = conn.cursor(); cursor.execute("SELECT id FROM Mouvements_Stock WHERE fournisseur_id=?", (id_f_edit,))
-                            if cursor.fetchone(): st.error("Impossible : Ce fournisseur a des factures liées.")
-                            else: cursor.execute("DELETE FROM Fournisseurs WHERE id=?", (id_f_edit,)); conn.commit(); st.rerun()
+        with st.form("form_add_fournisseur", clear_on_submit=True):
+            st.markdown("#### ➕ Ajouter un Fournisseur")
+            c1, c2 = st.columns(2)
+            f_nom = c1.text_input("Nom du fournisseur *", placeholder="Ex: Schneider Electric")
+            f_tel = c2.text_input("Téléphone", placeholder="Ex: +221 ...")
+            f_adr = st.text_input("Adresse")
+            
+            if st.form_submit_button("Enregistrer le fournisseur", type="primary"):
+                if f_nom:
+                    cursor = conn.cursor()
+                    cursor.execute("INSERT INTO Fournisseurs (nom, telephone, adresse) VALUES (?, ?, ?)", (f_nom, f_tel, f_adr))
+                    conn.commit()
+                    st.success(f"Fournisseur {f_nom} ajouté avec succès !")
+                    st.rerun()
+                else:
+                    st.error("Le nom du fournisseur est obligatoire.")
+                    
+        st.divider()
+        st.markdown("#### 📜 Liste des Fournisseurs")
+        df_fourn_liste = pd.read_sql_query("SELECT id as 'N°', nom as 'Nom', telephone as 'Téléphone', adresse as 'Adresse' FROM Fournisseurs ORDER BY nom", conn)
+        if not df_fourn_liste.empty:
+            st.dataframe(df_fourn_liste, use_container_width=True, hide_index=True)
+        else:
+            st.info("Aucun fournisseur enregistré pour le moment.")
 
     with tab_achats:
-        df_achats_prods = pd.read_sql_query("SELECT id, nom, prix_achat, code_barre FROM Produits WHERE est_achetable = 1 ORDER BY nom", conn)
-        df_deps = pd.read_sql_query("SELECT id, nom FROM Depots ORDER BY nom", conn)
-        df_frns = pd.read_sql_query("SELECT id, nom FROM Fournisseurs ORDER BY nom", conn)
+        df_fourn = pd.read_sql_query("SELECT id, nom FROM Fournisseurs ORDER BY nom", conn)
+        df_depots = pd.read_sql_query("SELECT id, nom FROM Depots ORDER BY nom", conn)
+        df_prods = pd.read_sql_query("SELECT id, nom, prix_achat, code_barre FROM Produits WHERE composition_id IS NULL ORDER BY nom", conn)
         
-        if df_achats_prods.empty or df_deps.empty or df_frns.empty: 
-            st.warning("Assurez-vous d'avoir au moins 1 Fournisseur, 1 Dépôt, et 1 Article marqué comme 'Achetable' dans le catalogue.")
+        if df_fourn.empty or df_depots.empty or df_prods.empty:
+            st.warning("⚠️ Assurez-vous d'avoir au moins un fournisseur, un dépôt et un produit de base enregistrés.")
         else:
-            dict_achats_form = {}
-            for _, row in df_achats_prods.iterrows():
-                lbl_code = f"[{row['code_barre']}] " if pd.notna(row['code_barre']) and str(row['code_barre']).strip() != "" else ""
-                dict_achats_form[f"{lbl_code}{row['nom']}"] = row['id']
-                
-            dict_deps_form = dict(zip(df_deps['nom'], df_deps['id']))
-            dict_frns_form = dict(zip(df_frns['nom'], df_frns['id']))
-            
             st.markdown("### 🧾 Saisie d'une Facture d'Achat")
-            c_header1, c_header2, c_header3 = st.columns([2, 2, 1])
-            fournisseur_sel = c_header1.selectbox("Fournisseur", options=list(dict_frns_form.keys()), key=f"f_{st.session_state.reset_achat}")
-            ref_facture = c_header2.text_input("N° Facture / BL", key=f"r_{st.session_state.reset_achat}")
-            date_facture = c_header3.date_input("Date", value=datetime.datetime.now().date(), key=f"d_{st.session_state.reset_achat}")
+            
+            c_f, c_r, c_d = st.columns(3)
+            fourn_dict = dict(zip(df_fourn["nom"], df_fourn["id"]))
+            choix_fourn = c_f.selectbox("Fournisseur", options=list(fourn_dict.keys()))
+            ref_facture = c_r.text_input("N° Facture / BL", placeholder="Ex: FACT-2026-09-07")
+            date_facture = c_d.date_input("Date")
             
             st.markdown("#### Ajouter une ligne")
+            
+            dict_prods_achats = {}
+            for _, row in df_prods.iterrows():
+                lbl_code = f"[{row['code_barre']}] " if pd.notna(row['code_barre']) and str(row['code_barre']).strip() != "" else ""
+                dict_prods_achats[f"{lbl_code}{row['nom']}"] = row['id']
+                
+            depot_dict = dict(zip(df_depots["nom"], df_depots["id"]))
+            
+            if "panier_achat" not in st.session_state:
+                st.session_state.panier_achat = []
+                
             with st.form("form_add_ligne_achat", clear_on_submit=True):
-                c_sc, c_l1, c_l2 = st.columns([1.5, 2.5, 1.5])
-                code_scanne_ach = c_sc.text_input("Douchette (Code Barre)", placeholder="Scanner ici...")
-                ing_add = c_l1.selectbox("Ou Recherche manuelle", options=list(dict_achats_form.keys()), index=None)
+                col_scan, col_search, col_depot = st.columns(3)
+                code_scanne = col_scan.text_input("Douchette (Code Barre)", placeholder="Scanner ici...")
+                plat_recherche = col_search.selectbox("Ou Recherche manuelle", options=list(dict_prods_achats.keys()), index=None)
+                choix_depot_ligne = col_depot.selectbox("Dépôt de réception", options=list(depot_dict.keys()))
                 
-                idx_dep_princ = 0
-                keys_dep = list(dict_deps_form.keys())
-                for i, d_nom in enumerate(keys_dep):
-                    if "PRINCIPAL" in d_nom.upper(): idx_dep_princ = i; break
-                dep_add = c_l2.selectbox("Dépôt de réception", options=keys_dep, index=idx_dep_princ)
+                col_qte, col_pa, col_btn = st.columns([1, 1, 1])
+                a_qte = col_qte.number_input("Quantité", min_value=1.0, step=1.0)
+                a_pa = col_pa.number_input(f"Prix Unitaire Actuel", min_value=0.0, step=100.0)
                 
-                c_l3, c_l4, c_sbtn = st.columns([1, 1, 1])
-                qte_add = c_l3.number_input("Quantité", min_value=1.0, value=1.0, step=1.0)
-                prix_u_add = c_l4.number_input("Prix Unitaire Actuel", value=0.0, step=100.0)
-                
-                c_sbtn.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-                valider_ligne = c_sbtn.form_submit_button("➕ Ajouter au bordereau", use_container_width=True)
-                
-                if valider_ligne:
-                    p_id_ach = None
-                    if code_scanne_ach:
-                        match_prod = df_achats_prods[df_achats_prods['code_barre'] == str(code_scanne_ach).strip()]
-                        if not match_prod.empty: p_id_ach = int(match_prod.iloc[0]['id'])
+                col_btn.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                if col_btn.form_submit_button("➕ Ajouter au bordereau", use_container_width=True):
+                    p_id = None
+                    if code_scanne:
+                        match_prod = df_prods[df_prods['code_barre'] == str(code_scanne).strip()]
+                        if not match_prod.empty: p_id = int(match_prod.iloc[0]['id'])
                         else: st.error("⚠️ Code barre introuvable !")
-                    elif ing_add:
-                        p_id_ach = int(dict_achats_form[ing_add])
+                    elif plat_recherche:
+                        p_id = int(dict_prods_achats[plat_recherche])
                         
-                    if p_id_ach:
-                        row_prod_ach = df_achats_prods[df_achats_prods['id'] == p_id_ach].iloc[0]
-                        pu = prix_u_add if prix_u_add > 0 else float(row_prod_ach['prix_achat'])
-                        tot_ligne = qte_add * pu
-                        st.session_state.panier_achats.append({"prod_id": p_id_ach, "nom": row_prod_ach['nom'], "depot_id": dict_deps_form[dep_add], "depot_nom": dep_add, "qte": qte_add, "prix_u": pu, "total": tot_ligne})
+                    if p_id:
+                        nom_p = df_prods[df_prods['id'] == p_id].iloc[0]['nom']
+                        
+                        pa_final = a_pa
+                        if a_pa == 0:
+                            pa_final = float(df_prods[df_prods['id'] == p_id].iloc[0]['prix_achat'] or 0.0)
+                            
+                        st.session_state.panier_achat.append({
+                            "id": p_id,
+                            "nom": nom_p,
+                            "qte": a_qte,
+                            "pa": pa_final,
+                            "total": a_qte * pa_final,
+                            "depot_id": depot_dict[choix_depot_ligne],
+                            "depot_nom": choix_depot_ligne
+                        })
                         st.rerun()
 
-            if st.session_state.panier_achats:
-                st.divider()
-                st.markdown("#### 📋 Détail du bordereau en cours")
-                total_facture = 0
-                for idx, item in enumerate(st.session_state.panier_achats):
-                    total_facture += item['total']
-                    cl_n, cl_d, cl_q, cl_pu, cl_tot, cl_del = st.columns([2.5, 1.5, 1, 1.5, 1, 0.5])
-                    cl_n.write(item['nom']); cl_d.write(item['depot_nom']); cl_q.write(fmt_qte(item['qte'])); cl_pu.write(f"{fmt_prix(item['prix_u'])} F"); cl_tot.write(f"**{fmt_prix(item['total'])} F**")
-                    if cl_del.button("❌", key=f"del_ac_{idx}"): st.session_state.panier_achats.pop(idx); st.rerun()
-                st.markdown(f"<h3 style='text-align: right;'>TOTAL FACTURE : {fmt_prix(total_facture)} FCFA</h3>", unsafe_allow_html=True)
+            if st.session_state.panier_achat:
+                st.write("")
+                st.markdown("##### 🛒 Bordereau en cours")
                 
-                if st.button("✅ Valider et Enregistrer la Facture d'Achat", type="primary", use_container_width=True):
-                    cursor = conn.cursor()
-                    f_id = dict_frns_form[fournisseur_sel]
-                    ref_f = ref_facture if ref_facture else "Achat standard"
-                    date_insertion = datetime.datetime.combine(date_facture, datetime.datetime.now().time()).strftime("%Y-%m-%d %H:%M:%S")
+                for i, item in enumerate(st.session_state.panier_achat):
+                    c_item1, c_item2, c_item3, c_item4, c_item5, c_item6 = st.columns([3, 2, 1, 1.5, 1.5, 0.5])
+                    c_item1.write(item["nom"])
+                    c_item2.write(f"🏢 {item['depot_nom']}")
+                    c_item3.write(fmt_qte(item["qte"]))
+                    c_item4.write(f"{fmt_prix(item['pa'])} {sys_monnaie}")
+                    c_item5.write(f"{fmt_prix(item['total'])} {sys_monnaie}")
+                    if c_item6.button("❌", key=f"del_achat_{i}"):
+                        st.session_state.panier_achat.pop(i)
+                        st.rerun()
+                
+                st.divider()
+                total_facture_achat = sum(item["total"] for item in st.session_state.panier_achat)
+                st.markdown(f"<h4 style='text-align: right; color: #0288d1;'>TOTAL FACTURE : {fmt_prix(total_facture_achat)} {sys_monnaie}</h4>", unsafe_allow_html=True)
+                
+                c_val, c_vid = st.columns([3, 1])
+                if c_val.button("✅ Valider la facture et Entrer en Stock", type="primary", use_container_width=True):
+                    if not ref_facture: ref_facture = "Sans Réf"
+                    id_fourn = fourn_dict[choix_fourn]
                     
-                    for item in st.session_state.panier_achats:
-                        p_id = item['prod_id']
-                        d_id = item['depot_id']
-                        qte_achet = item['qte']
+                    cursor = conn.cursor()
+                    dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    # 1. Vérification et création de la colonne CMUP si elle n'existe pas encore
+                    cursor.execute("PRAGMA table_info(Produits)")
+                    if "cmup" not in [c[1] for c in cursor.fetchall()]:
+                        cursor.execute("ALTER TABLE Produits ADD COLUMN cmup REAL DEFAULT 0")
+                        cursor.execute("UPDATE Produits SET cmup = prix_achat")
+                    
+                    # 2. Créer la facture
+                    cursor.execute("INSERT INTO Factures_Achat (fournisseur_id, reference_facture, date_facture, montant_total, date_saisie) VALUES (?, ?, ?, ?, ?)", (id_fourn, ref_facture, date_facture, total_facture_achat, dt_now))
+                    
+                    ref_mouvement = f"Achat - Facture {ref_facture}"
+                    
+                    # 3. Mouvements, Stocks et Calcul du CMUP
+                    for item in st.session_state.panier_achat:
+                        pid = item["id"]
+                        q = item["qte"]
+                        pa = item["pa"]
+                        depot_ligne_id = item["depot_id"]
                         
-                        cursor.execute("INSERT INTO Mouvements_Stock (produit_id, depot_id, fournisseur_id, type_mouvement, quantite, prix_unitaire, valeur_totale, reference, date_mvt) VALUES (?, ?, ?, 'Entrée (Achat)', ?, ?, ?, ?, ?)", (p_id, d_id, f_id, qte_achet, item['prix_u'], item['total'], ref_f, date_insertion))
-                        cursor.execute("UPDATE Produits SET prix_achat=? WHERE id=?", (item['prix_u'], p_id))
+                        # --- CALCUL DU PRIX DE REVIENT MOYEN (CMUP) ---
+                        # On cherche la quantité totale actuelle de ce produit (tous dépôts confondus)
+                        cursor.execute("SELECT SUM(quantite) FROM Stock_Plats WHERE produit_id=?", (pid,))
+                        res_qte = cursor.fetchone()
+                        stock_actuel = max(0, res_qte[0] if res_qte and res_qte[0] else 0)
                         
-                        cursor.execute("SELECT composition_id, composition_qte FROM Produits WHERE id = ?", (p_id,))
-                        comp_res = cursor.fetchone()
-                        base_id = p_id
-                        qte_stock_add = qte_achet
-                        if comp_res and comp_res[0]:
-                            base_id = comp_res[0]
-                            qte_stock_add = qte_achet * float(comp_res[1])
+                        # On récupère l'ancien CMUP
+                        cursor.execute("SELECT cmup, prix_achat FROM Produits WHERE id=?", (pid,))
+                        res_p = cursor.fetchone()
+                        ancien_cmup = res_p[0] if res_p and res_p[0] else (res_p[1] if res_p and res_p[1] else 0.0)
+                        
+                        nouvel_inventaire = stock_actuel + q
+                        nouveau_cmup = ((stock_actuel * ancien_cmup) + (q * pa)) / nouvel_inventaire if nouvel_inventaire > 0 else pa
+                        # -----------------------------------------------
+                        
+                        cursor.execute("INSERT INTO Mouvements_Stock (produit_id, depot_id, type_mouvement, quantite, reference, date_mvt) VALUES (?, ?, 'Entrée (Achat)', ?, ?, ?)", (pid, depot_ligne_id, q, ref_mouvement, dt_now))
+                        
+                        cursor.execute("SELECT quantite FROM Stock_Plats WHERE produit_id=? AND depot_id=?", (pid, depot_ligne_id))
+                        if cursor.fetchone():
+                            cursor.execute("UPDATE Stock_Plats SET quantite=quantite+? WHERE produit_id=? AND depot_id=?", (q, pid, depot_ligne_id))
+                        else:
+                            cursor.execute("INSERT INTO Stock_Plats (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (pid, depot_ligne_id, q))
                             
-                        cursor.execute("SELECT quantite FROM Stock_Plats WHERE produit_id=? AND depot_id=?", (base_id, d_id))
-                        res_stock = cursor.fetchone()
-                        if res_stock: cursor.execute("UPDATE Stock_Plats SET quantite = quantite + ? WHERE produit_id=? AND depot_id=?", (qte_stock_add, base_id, d_id))
-                        else: cursor.execute("INSERT INTO Stock_Plats (produit_id, depot_id, quantite) VALUES (?, ?, ?)", (base_id, d_id, qte_stock_add))
-                            
+                        # On met à jour le dernier prix d'achat ET le nouveau prix de revient (CMUP)
+                        cursor.execute("UPDATE Produits SET prix_achat=?, cmup=? WHERE id=?", (pa, nouveau_cmup, pid))
+                        
                     conn.commit()
-                    st.session_state.panier_achats = []
-                    st.session_state.reset_achat += 1
-                    st.success("Facture validée et stocks incrémentés !"); st.rerun()
+                    st.session_state.panier_achat = []
+                    st.success(f"Facture validée ! Le stock et les Prix de Revient Moyens (CMUP) ont été mis à jour.")
+                    st.rerun()
 
     with tab_hist_achats:
-        st.markdown("### 📊 Historique des Achats")
-        df_hist_achats = pd.read_sql_query("SELECT DATE(m.date_mvt) as Date, f.nom as Fournisseur, m.reference as Référence, p.nom as Article, m.quantite as Qté, m.prix_unitaire as PU, m.valeur_totale as Total FROM Mouvements_Stock m LEFT JOIN Fournisseurs f ON m.fournisseur_id = f.id JOIN Produits p ON m.produit_id = p.id WHERE m.type_mouvement = 'Entrée (Achat)' ORDER BY m.date_mvt DESC", conn)
-        if df_hist_achats.empty: st.info("Aucun achat enregistré.")
+        st.markdown("#### 📜 Historique des Factures d'Achat")
+        df_hist_achats = pd.read_sql_query("""
+            SELECT fa.id as 'N°', f.nom as 'Fournisseur', fa.reference_facture as 'N° Facture / BL', fa.date_facture as 'Date Facture', fa.montant_total as 'Montant Total', fa.date_saisie as 'Date Saisie'
+            FROM Factures_Achat fa
+            JOIN Fournisseurs f ON fa.fournisseur_id = f.id
+            ORDER BY fa.id DESC
+        """, conn)
+        
+        if not df_hist_achats.empty:
+            df_hist_achats['Montant Total'] = df_hist_achats['Montant Total'].apply(lambda x: f"{fmt_prix(x)} {sys_monnaie}")
+            st.dataframe(df_hist_achats, use_container_width=True, hide_index=True)
         else:
-            c_f1, c_f2 = st.columns(2)
-            f_date_achat = c_f1.selectbox("Filtrer par Date :", ["Toutes"] + list(df_hist_achats['Date'].unique()))
-            f_fourn_achat = c_f2.selectbox("Filtrer par Fournisseur :", ["Tous"] + list(df_hist_achats['Fournisseur'].dropna().unique()))
-            df_filtre_ach = df_hist_achats.copy()
-            if f_date_achat != "Toutes": df_filtre_ach = df_filtre_ach[df_filtre_ach['Date'] == f_date_achat]
-            if f_fourn_achat != "Tous": df_filtre_ach = df_filtre_ach[df_filtre_ach['Fournisseur'] == f_fourn_achat]
-            
-            df_factures = df_filtre_ach.groupby(['Date', 'Fournisseur', 'Référence'])['Total'].sum().reset_index()
-            st.markdown(f"#### 💰 Total achats de la sélection : {fmt_prix(df_factures['Total'].sum())} FCFA")
-            
-            tab_vue_factures, tab_vue_details = st.tabs(["📋 Récap Factures", "🔍 Détails Lignes"])
-            with tab_vue_factures:
-                df_fact_afficher = df_factures.copy(); df_fact_afficher['Total'] = df_fact_afficher['Total'].apply(fmt_prix)
-                st.dataframe(df_fact_afficher, use_container_width=True, hide_index=True)
-                st.download_button("📥 Exporter", convert_df_to_csv(df_fact_afficher), "Factures.csv", "text/csv")
-            with tab_vue_details:
-                df_det_afficher = df_filtre_ach.copy(); df_det_afficher['Qté'] = df_det_afficher['Qté'].apply(fmt_qte); df_det_afficher['PU'] = df_det_afficher['PU'].apply(fmt_prix); df_det_afficher['Total'] = df_det_afficher['Total'].apply(fmt_prix)
-                st.dataframe(df_det_afficher, use_container_width=True, hide_index=True)
+            st.info("Aucune facture d'achat enregistrée pour le moment.")
 
 elif menu == "Stocks & Mouvements":
     st.markdown("### 📦 Stocks et Mouvements des Articles")
@@ -1692,7 +2075,7 @@ elif menu == "Stocks & Mouvements":
 
 
     with tab_admin:
-        if role_actif == "Manager":
+        if role_actif in ["Super Admin", "Manager"]:
             st.warning("⚠️ Attention, ces actions vont supprimer l'historique sélectionné et recalculer les stocks en fonction de ce qui reste. Ces actions sont irréversibles.")
             
             col_b1, col_b2, col_b3 = st.columns(3)
