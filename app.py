@@ -6,6 +6,12 @@ import pandas as pd
 import streamlit as st
 import io
 
+try:
+    print("Executing query:", query_paies)
+    df_paies = pd.read_sql_query(query_paies, conn)
+except Exception as e:
+    print(f"SQL Error: {e}")
+
 st.set_page_config(page_title="Gestion Caisse POS & Stocks", page_icon="🍽️", layout="wide")
 st.markdown(
     """
@@ -116,6 +122,30 @@ def force_db_update():
     if cursor.fetchone()[0] == 0:
         for m in ["Espèces", "Carte Bancaire", "Wave", "Orange Money", "Chèque", "À Crédit"]: cursor.execute("INSERT INTO Methodes_Paiement (nom) VALUES (?)", (m,))
 
+    # --- MISE À JOUR DE LA BASE DE DONNÉES (POURBOIRES ET ENCAISSEURS) ---
+    cursor.execute("PRAGMA table_info(Paiements_Ticket)")
+    colonnes_paies = [col[1] for col in cursor.fetchall()]
+    if "utilisateur_id" not in colonnes_paies: 
+        cursor.execute("ALTER TABLE Paiements_Ticket ADD COLUMN utilisateur_id INTEGER")
+        cursor.execute("UPDATE Paiements_Ticket SET utilisateur_id = (SELECT utilisateur_id FROM Commandes WHERE Commandes.id = Paiements_Ticket.commande_id)")
+    if "pourboire" not in colonnes_paies: 
+        cursor.execute("ALTER TABLE Paiements_Ticket ADD COLUMN pourboire REAL DEFAULT 0")
+    # --------------------------------------------------------------------
+    if "pourboire" not in colonnes_paies: 
+        cursor.execute("ALTER TABLE Paiements_Ticket ADD COLUMN pourboire REAL DEFAULT 0")
+        
+    # --- NOUVELLE LIGNE D'AUTO-RÉPARATION ---
+    cursor.execute("UPDATE Paiements_Ticket SET utilisateur_id = (SELECT utilisateur_id FROM Commandes WHERE Commandes.id = Paiements_Ticket.commande_id) WHERE utilisateur_id IS NULL")
+    # ----------------------------------------
+# --- MISE À JOUR DE LA BASE DE DONNÉES (CLÔTURE CAISSE) ---
+    cursor.execute("PRAGMA table_info(Sessions_Caisse)")
+    colonnes_sessions = [col[1] for col in cursor.fetchall()]
+    if "montant_compte" not in colonnes_sessions: 
+        cursor.execute("ALTER TABLE Sessions_Caisse ADD COLUMN montant_compte REAL DEFAULT 0")
+    if "ecart" not in colonnes_sessions: 
+        cursor.execute("ALTER TABLE Sessions_Caisse ADD COLUMN ecart REAL DEFAULT 0")
+    # ----------------------------------------------------------
+
     conn.commit()
     conn.close()
 
@@ -214,10 +244,6 @@ if "pourboire_ticket" not in st.session_state: st.session_state.pourboire_ticket
 if "paiements_credit" not in st.session_state: st.session_state.paiements_credit = []
 if "pourboire_credit" not in st.session_state: st.session_state.pourboire_credit = 0.0
 if "credit_ticket_id" not in st.session_state: st.session_state.credit_ticket_id = None
-
-# =====================================================================
-# 1. SYSTÈME DE SÉCURITÉ : LOGIN ET OUVERTURE DE CAISSE
-# =====================================================================
 
 # =====================================================================
 # 1. SYSTÈME DE SÉCURITÉ : LOGIN ET OUVERTURE DE CAISSE
@@ -373,24 +399,25 @@ elif session_en_cours:
     st.session_state.caisse_nom = res_c_nom[0] if res_c_nom else "Caisse Inconnue"
 
 # =====================================================================
-# 2. MENU PRINCIPAL ET BARRE LATÉRALE
-# =====================================================================
+# 2. MENU PRINCIPAL ET BARRE LATÉRALE# =====================================================================
 role_actif = st.session_state.utilisateur["role"]
 
 st.sidebar.markdown(f"👤 **{st.session_state.utilisateur['nom']}** ({role_actif})")
 st.sidebar.markdown(f"🏪 **{st.session_state.caisse_nom}**")
 st.sidebar.info(f"🕒 **Horloge Système**\n\n{datetime.datetime.now().strftime(sys_format_date if 'sys_format_date' in globals() else '%Y-%m-%d %H:%M')}")
 
-# Si on est en caisse, on affiche "Fermer la caisse". Si on est en Back-Office, on affiche "Se déconnecter"
+if "demande_cloture" not in st.session_state:
+    st.session_state.demande_cloture = False
+
 if not st.session_state.mode_backoffice:
-    if st.sidebar.button("🔒 Fermer la caisse & Quitter", type="primary", use_container_width=True):
-        cursor = conn.cursor()
-        dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        cursor.execute("UPDATE Caisses SET est_ouverte = 0 WHERE id = ?", (st.session_state.caisse_id,))
-        cursor.execute("UPDATE Sessions_Caisse SET date_fermeture = ?, statut = 'Fermée' WHERE id = ?", (dt_now, st.session_state.session_id))
-        conn.commit()
+    # 1. Bouton de pause (Déconnexion simple, la caisse reste à son nom)
+    if st.sidebar.button("🚪 Suspendre / Pause", use_container_width=True):
         st.session_state.utilisateur = None
-        st.session_state.mode_backoffice = False
+        st.rerun()
+        
+    # 2. Bouton de fin de service (Déclenche le comptage de l'argent)
+    if st.sidebar.button("🛑 Clôturer la Caisse (Z)", type="primary", use_container_width=True):
+        st.session_state.demande_cloture = True
         st.rerun()
 else:
     if st.sidebar.button("🚪 Se déconnecter du Back-Office", use_container_width=True):
@@ -400,17 +427,79 @@ else:
 
 st.sidebar.divider()
 
-if role_actif in ["Super Admin", "Manager"]:
-    menu_options = ["Prise de Commande", "Tableau de Bord", "Mouvements Caisse", "Achats (Fournisseurs)", "Catalogue Articles", "Stocks & Mouvements", "Clients (CRM)", "Paramètres", "Équipe (Utilisateurs)"]
-else:
-    # NOUVEAU : On ajoute "Tableau de Bord" pour le Caissier
-    menu_options = ["Prise de Commande", "Tableau de Bord", "Mouvements Caisse", "Clients (CRM)"]
+# =====================================================================
+# ÉCRAN DE CLÔTURE DE CAISSE (BLOQUANT)
+# =====================================================================
+if st.session_state.get("demande_cloture", False):
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    col_cl1, col_cl2, col_cl3 = st.columns([1, 2, 1])
+    with col_cl2:
+        st.markdown("<h3 style='text-align: center; color: #d32f2f;'>🔒 Procédure de Clôture</h3>", unsafe_allow_html=True)
+        st.warning("Veuillez compter physiquement l'argent présent dans votre tiroir-caisse (billets et pièces) et saisir le total exact ci-dessous.")
+        
+        with st.form("form_cloture"):
+            monnaie_aff = sys_monnaie if 'sys_monnaie' in globals() else 'FCFA'
+            montant_saisi = st.number_input(f"Montant total compté en espèces ({monnaie_aff}) *", min_value=0.0, step=500.0)
+            
+            c_btn1, c_btn2 = st.columns(2)
+            if c_btn1.form_submit_button("✅ Valider & Fermer", type="primary", use_container_width=True):
+                cursor = conn.cursor()
+                dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                uid = st.session_state.utilisateur["id"]
+                
+                # 1. On récupère la date d'ouverture exacte de CE caissier aujourd'hui
+                cursor.execute("SELECT date_ouverture FROM Sessions_Caisse WHERE id = ?", (st.session_state.session_id,))
+                date_ouv = cursor.fetchone()[0]
+                
+                # 2. Calcul des Fonds + Entrées (On exclut les crédits CRM pour éviter les doublons avec les paiements)
+                cursor.execute("SELECT SUM(montant) FROM Mouvements_Caisse WHERE utilisateur_id=? AND date_mvt>=? AND type_mouvement IN ('Fond de Caisse', 'Entrée') AND motif NOT LIKE 'Règlement Crédit Client%'", (uid, date_ouv))
+                entrees = cursor.fetchone()[0] or 0.0
+                
+                # 3. Calcul des Sorties (Dépenses)
+                cursor.execute("SELECT SUM(montant) FROM Mouvements_Caisse WHERE utilisateur_id=? AND date_mvt>=? AND type_mouvement='Sortie'", (uid, date_ouv))
+                sorties = cursor.fetchone()[0] or 0.0
+                
+                # 4. Calcul de toutes les ventes et recouvrements payés en Espèces
+                cursor.execute("SELECT SUM(montant) FROM Paiements_Ticket WHERE utilisateur_id=? AND date_paiement>=? AND methode='Espèces'", (uid, date_ouv))
+                ventes_especes = cursor.fetchone()[0] or 0.0
+                
+                # Calcul de l'écart mathématique
+                attendu = entrees + ventes_especes - sorties
+                ecart = montant_saisi - attendu
+                
+                # Fermeture et sauvegarde
+                cursor.execute("UPDATE Caisses SET est_ouverte = 0 WHERE id = ?", (st.session_state.caisse_id,))
+                cursor.execute("UPDATE Sessions_Caisse SET date_fermeture = ?, statut = 'Fermée', montant_compte = ?, ecart = ? WHERE id = ?", (dt_now, montant_saisi, ecart, st.session_state.session_id))
+                conn.commit()
+                
+                # Déconnexion propre
+                st.session_state.demande_cloture = False
+                st.session_state.utilisateur = None
+                st.session_state.mode_backoffice = False
+                st.rerun()
+                
+            if c_btn2.form_submit_button("❌ Annuler", use_container_width=True):
+                st.session_state.demande_cloture = False
+                st.rerun()
+                
+    st.stop() # Empêche l'affichage du reste de l'application
+# =====================================================================
 
+# --- CORRECTION DE LA FAILLE "TIROIR FANTÔME" ---
+if st.session_state.mode_backoffice:
+    # Le Back-Office n'a pas accès à l'argent ni aux ventes
+    menu_options = ["Tableau de Bord", "Achats (Fournisseurs)", "Catalogue Articles", "Stocks & Mouvements", "Clients (CRM)", "Paramètres", "Équipe (Utilisateurs)"]
+else:
+    # Si on est connecté à une vraie caisse
+    if role_actif in ["Super Admin", "Manager"]:
+        menu_options = ["Prise de Commande", "Tableau de Bord", "Mouvements Caisse", "Achats (Fournisseurs)", "Catalogue Articles", "Stocks & Mouvements", "Clients (CRM)", "Paramètres", "Équipe (Utilisateurs)"]
+    else:
+        menu_options = ["Prise de Commande", "Tableau de Bord", "Mouvements Caisse", "Clients (CRM)"]
 
 menu = st.sidebar.radio("Navigation", menu_options)
 
 # =====================================================================
-# Ensuite vient votre code normal : if menu == "Prise de Commande": ...
+# Ensuite vient votre code normal : if menu == ...
 # =====================================================================    
 conn = get_connection()
 
@@ -453,12 +542,27 @@ if menu == "Équipe (Utilisateurs)":
 
     with col2:
         st.subheader("Liste et Gestion de l'équipe")
-        df_users_liste = pd.read_sql_query("""
-            SELECT u.id, u.nom, u.role, COALESCE(c.nom, '-- Aucune --') as caisse_assignee 
-            FROM Utilisateurs u 
-            LEFT JOIN Caisses c ON u.caisse_id = c.id 
-            ORDER BY u.nom
-        """, conn)
+        
+        # --- 1. LE BOUCLIER D'INVISIBILITÉ ---
+        # Si c'est un Manager, on exclut totalement les Super Admin de la requête SQL
+        if role_actif == "Manager":
+            query_users = """
+                SELECT u.id, u.nom, u.role, COALESCE(c.nom, '-- Aucune --') as caisse_assignee 
+                FROM Utilisateurs u 
+                LEFT JOIN Caisses c ON u.caisse_id = c.id 
+                WHERE u.role != 'Super Admin'
+                ORDER BY u.nom
+            """
+        else:
+            # Le Super Admin, lui, voit tout le monde
+            query_users = """
+                SELECT u.id, u.nom, u.role, COALESCE(c.nom, '-- Aucune --') as caisse_assignee 
+                FROM Utilisateurs u 
+                LEFT JOIN Caisses c ON u.caisse_id = c.id 
+                ORDER BY u.nom
+            """
+            
+        df_users_liste = pd.read_sql_query(query_users, conn)
         
         df_aff_users = df_users_liste.rename(columns={"nom": "Nom", "role": "Rôle", "caisse_assignee": "Caisse Dédiée"})
         st.dataframe(df_aff_users[["Nom", "Rôle", "Caisse Dédiée"]], use_container_width=True, hide_index=True)
@@ -479,9 +583,19 @@ if menu == "Équipe (Utilisateurs)":
                     e_nom = st.text_input("Nouveau nom", value=choix_u)
                     e_pin = st.text_input("Nouveau Code PIN (Laissez vide pour garder l'ancien)", type="password")
                     
-                    roles_dispos = ["Manager", "Caissier", "Super Admin"] if role_actif == "Super Admin" else ["Manager", "Caissier"]
+                    # --- 2. LE VERROU ANTI-ERREUR ---
+                    if role_actuel_u == "Super Admin":
+                        # On force le rôle "Super Admin" et on grise le sélecteur
+                        roles_dispos = ["Super Admin"]
+                        verrouiller_role = True
+                    else:
+                        roles_dispos = ["Manager", "Caissier", "Super Admin"] if role_actif == "Super Admin" else ["Manager", "Caissier"]
+                        verrouiller_role = False
+
                     idx_role = roles_dispos.index(role_actuel_u) if role_actuel_u in roles_dispos else 0
-                    e_role = st.selectbox("Rôle", roles_dispos, index=idx_role)
+                    
+                    # Le paramètre "disabled" empêche de cliquer sur la boîte de sélection
+                    e_role = st.selectbox("Rôle", roles_dispos, index=idx_role, disabled=verrouiller_role)
                     
                     idx_c = list(dict_c_assign.keys()).index(caisse_actuelle) if caisse_actuelle in dict_c_assign else 0
                     e_caisse = st.selectbox("Assigner à la Caisse :", list(dict_c_assign.keys()), index=idx_c)
@@ -532,7 +646,14 @@ elif menu == "Mouvements Caisse":
         aujourdhui_biz = (datetime.datetime.now() - datetime.timedelta(hours=sys_heure_fin)).date()
         date_filtre_mvt = st.date_input("📅 Filtrer par date :", value=aujourdhui_biz)
         
-        df_depenses = pd.read_sql_query("SELECT m.id, m.date_mvt, m.type_mouvement, m.motif, m.montant, u.nom as utilisateur FROM Mouvements_Caisse m LEFT JOIN Utilisateurs u ON m.utilisateur_id = u.id ORDER BY m.date_mvt DESC", conn)
+        if role_actif in ["Super Admin", "Manager"]:
+            query_mvt = "SELECT m.id, m.date_mvt, m.type_mouvement, m.motif, m.montant, u.nom as utilisateur FROM Mouvements_Caisse m LEFT JOIN Utilisateurs u ON m.utilisateur_id = u.id ORDER BY m.date_mvt DESC"
+            params_mvt = ()
+        else:
+            query_mvt = "SELECT m.id, m.date_mvt, m.type_mouvement, m.motif, m.montant, u.nom as utilisateur FROM Mouvements_Caisse m LEFT JOIN Utilisateurs u ON m.utilisateur_id = u.id WHERE m.utilisateur_id = ? ORDER BY m.date_mvt DESC"
+            params_mvt = (st.session_state.utilisateur["id"],)
+            
+        df_depenses = pd.read_sql_query(query_mvt, conn, params=params_mvt)
         
         if not df_depenses.empty:
             df_depenses['Date_Exploitation'] = (pd.to_datetime(df_depenses['date_mvt']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
@@ -642,8 +763,8 @@ elif menu == "Tableau de Bord":
         fichier_periode = f"{date_debut.strftime('%Y%m%d')}_au_{date_fin.strftime('%Y%m%d')}"
         lbl_periode = "(Période)"
         
-    # --- Création des 3 onglets ---
-    tab_z, tab_depenses, tab_stats = st.tabs(["📑 Rapport Z de Caisse", "💸 Dépenses & Tiroir-Caisse", "📈 Statistiques & Palmarès"])
+    # --- Création des 4 onglets ---
+    tab_z, tab_depenses, tab_stats, tab_ecarts = st.tabs(["📑 Rapport Z de Caisse", "💸 Dépenses & Tiroir-Caisse", "📈 Statistiques & Palmarès", "🔒 Contrôle des Caisses"])
     
     with tab_z:
         query_mvt = "SELECT type_mouvement, montant, date_mvt FROM Mouvements_Caisse"
@@ -659,10 +780,12 @@ elif menu == "Tableau de Bord":
         else:
             fond_caisse, entrees_mvt, sorties_mvt = 0.0, 0.0, 0.0
             
-        query_paies = "SELECT p.montant, p.methode, p.date_paiement, c.date_creation FROM Paiements_Ticket p JOIN Commandes c ON p.commande_id = c.id WHERE p.methode NOT LIKE '%À Crédit%' AND p.methode NOT LIKE '%Note de Chambre%' AND c.statut != 'Annulée'"
-        if filtre_user_id: query_paies += f" AND c.utilisateur_id = {filtre_user_id}"
+        # Le filtre utilisateur_id s'applique maintenant au PAIEMENT (Celui qui encaisse)
+        query_paies = "SELECT p.montant, p.methode, p.date_paiement, c.date_creation, p.utilisateur_id, p.pourboire FROM Paiements_Ticket p JOIN Commandes c ON p.commande_id = c.id WHERE p.methode NOT LIKE '%À Crédit%' AND p.methode NOT LIKE '%Note de Chambre%' AND c.statut != 'Annulée'"
+        if filtre_user_id: query_paies += f" AND p.utilisateur_id = {filtre_user_id}"
         df_paies = pd.read_sql_query(query_paies, conn)
         
+        # Le filtre utilisateur_id s'applique à la COMMANDE (Celui qui crée le ticket)
         query_cmd = "SELECT id, total, pourboire, date_creation, statut FROM Commandes WHERE statut IN ('Payée', 'À Crédit')"
         if filtre_user_id: query_cmd += f" AND utilisateur_id = {filtre_user_id}"
         df_cmd = pd.read_sql_query(query_cmd, conn)
@@ -710,11 +833,17 @@ elif menu == "Tableau de Bord":
             df_cmd['Date_Exploitation'] = (pd.to_datetime(df_cmd['date_creation']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
             cmd_today = df_cmd[(df_cmd['Date_Exploitation'] >= date_debut) & (df_cmd['Date_Exploitation'] <= date_fin)]
             ca_brut_ttc = cmd_today['total'].sum()
-            pourboires = cmd_today['pourboire'].sum()
+            pourboires_cmd = cmd_today['pourboire'].sum()
             nb_tickets = len(cmd_today)
         else:
-            ca_brut_ttc, pourboires, nb_tickets = 0.0, 0.0, 0
+            ca_brut_ttc, pourboires_cmd, nb_tickets = 0.0, 0.0, 0
             
+        # On ajoute les pourboires perçus par le caissier lors des recouvrements de dettes
+        pourboires_credits = 0.0
+        if not df_paies.empty and 'pourboire' in df_paies.columns:
+            pourboires_credits = paies_today['pourboire'].sum()
+            
+        pourboires = pourboires_cmd + pourboires_credits
         credits_du_jour = max(0.0, ca_brut_ttc - paies_tickets_du_jour_total)
         total_especes_attendu = fond_caisse + entrees_mvt + ventes_especes_jour + reglements_anciens_especes - sorties_mvt
         
@@ -740,7 +869,7 @@ elif menu == "Tableau de Bord":
         
         st.divider()
         
-        query_tous_tickets = "SELECT id as 'N°', date_creation as 'Heure', type_commande as 'Type', statut as 'Statut', COALESCE(methode_paiement, '-') as 'Paiement', total as 'Total' FROM Commandes WHERE statut != 'En attente'"
+        query_tous_tickets = "SELECT id as 'N°', date_creation as 'Heure', type_commande as 'Type', statut as 'Statut', CASE WHEN statut = 'Payée' AND methode_paiement = 'À Crédit' THEN COALESCE((SELECT GROUP_CONCAT(DISTINCT methode) FROM Paiements_Ticket WHERE commande_id = Commandes.id AND methode NOT LIKE '%À Crédit%'), 'Régularisé') ELSE COALESCE(methode_paiement, '-') END as 'Paiement', total as 'Total' FROM Commandes WHERE statut != 'En attente'"
         if filtre_user_id: query_tous_tickets += f" AND utilisateur_id = {filtre_user_id}"
         query_tous_tickets += " ORDER BY id DESC"
         
@@ -869,10 +998,13 @@ elif menu == "Tableau de Bord":
             st.info("Aucun mouvement enregistré.")
 
     with tab_stats:
-        st.markdown(f"#### 🏆 Palmarès des Ventes (Période : {titre_periode})")
+        st.markdown(f"#### 🏆 Palmarès & Rentabilité (Période : {titre_periode})")
         
+        # On ajoute le Prix d'Achat (CMUP) dans la requête pour calculer le coût réel
         df_stats = pd.read_sql_query("""
-            SELECT p.nom as Article, lc.quantite as Quantite, lc.sous_total as CA, c.date_creation 
+            SELECT p.nom as Article, lc.quantite as Quantite, lc.sous_total as CA, 
+                   (lc.quantite * COALESCE(p.prix_achat, 0)) as Cout_Achat,
+                   c.date_creation 
             FROM Lignes_Commande lc
             JOIN Produits p ON lc.produit_id = p.id
             JOIN Commandes c ON lc.commande_id = c.id
@@ -881,28 +1013,132 @@ elif menu == "Tableau de Bord":
         
         if not df_stats.empty:
             df_stats['Date_Exploitation'] = (pd.to_datetime(df_stats['date_creation']) - pd.Timedelta(hours=sys_heure_fin)).dt.date
-            df_stats_period = df_stats[(df_stats['Date_Exploitation'] >= date_debut) & (df_stats['Date_Exploitation'] <= date_fin)]
+            df_stats_period = df_stats[(df_stats['Date_Exploitation'] >= date_debut) & (df_stats['Date_Exploitation'] <= date_fin)].copy()
             
             if not df_stats_period.empty:
-                df_group = df_stats_period.groupby('Article').agg({'Quantite': 'sum', 'CA': 'sum'}).reset_index()
+                # --- CALCUL DE LA MARGE (CA - COÛT) ---
+                df_stats_period['Marge'] = df_stats_period['CA'] - df_stats_period['Cout_Achat']
+                df_group = df_stats_period.groupby('Article').agg({'Quantite': 'sum', 'CA': 'sum', 'Marge': 'sum'}).reset_index()
                 
-                c_stat1, c_stat2 = st.columns(2)
+                marge_totale = df_group['Marge'].sum()
+                ca_total_stats = df_group['CA'].sum()
+                taux_marge = (marge_totale / ca_total_stats * 100) if ca_total_stats > 0 else 0
+                
+                st.info(f"💡 **Rentabilité sur la période :** Marge Brute Estimée = **{fmt_prix(marge_totale)} {sys_monnaie}** (soit {taux_marge:.1f}% de bénéfice sur le CA).")
+                st.divider()
+                # --------------------------------------
+                
+                c_stat1, c_stat2, c_stat3 = st.columns(3)
                 
                 with c_stat1:
-                    st.markdown("**📦 Top 10 - Articles les plus vendus (Quantité)**")
+                    st.markdown("**📦 Top 10 Ventes (Quantité)**")
                     df_top_qte = df_group.sort_values(by='Quantite', ascending=False).head(10)
                     if not df_top_qte.empty:
                         st.bar_chart(df_top_qte.set_index('Article')['Quantite'])
                         
                 with c_stat2:
-                    st.markdown(f"**💰 Top 10 - Articles les plus rentables (CA en {sys_monnaie})**")
+                    st.markdown(f"**💰 Top 10 Chiffre d'Affaires**")
                     df_top_ca = df_group.sort_values(by='CA', ascending=False).head(10)
                     if not df_top_ca.empty:
                         st.bar_chart(df_top_ca.set_index('Article')['CA'])
+
+                with c_stat3:
+                    st.markdown(f"**📈 Top 10 Rentabilité (Bénéfice)**")
+                    df_top_marge = df_group.sort_values(by='Marge', ascending=False).head(10)
+                    if not df_top_marge.empty:
+                        st.bar_chart(df_top_marge.set_index('Article')['Marge'])
+                        
+                st.divider()
+                st.markdown("#### 📑 Détail des Marges par Article")
+                df_detail_marge = df_group.sort_values(by='Marge', ascending=False).copy()
+                df_detail_marge['Taux de Marge'] = (df_detail_marge['Marge'] / df_detail_marge['CA'] * 100).fillna(0).apply(lambda x: f"{x:.1f} %")
+                df_detail_marge['CA'] = df_detail_marge['CA'].apply(lambda x: f"{fmt_prix(x)} {sys_monnaie}")
+                df_detail_marge['Marge'] = df_detail_marge['Marge'].apply(lambda x: f"{fmt_prix(x)} {sys_monnaie}")
+                
+                st.dataframe(df_detail_marge[['Article', 'Quantite', 'CA', 'Marge', 'Taux de Marge']], use_container_width=True, hide_index=True)
+                
             else:
                 st.info("Aucune donnée de vente pour générer les graphiques sur cette période.")
         else:
             st.info("La base de données est vide. Vendez quelques articles pour voir apparaître les statistiques !")
+
+    with tab_ecarts:
+        if role_actif not in ["Super Admin", "Manager"]:
+            st.error("Accès refusé : Seuls les Managers peuvent consulter les écarts de caisse.")
+        else:
+            st.markdown(f"#### 🔎 Historique des Sessions & Écarts de Caisse (Période : {titre_periode})")
+            
+            query_sessions = """
+                SELECT s.id, u.nom as Caissier, c.nom as Caisse, s.date_ouverture, s.date_fermeture, 
+                       s.fond_initial, s.montant_compte, s.ecart, s.statut 
+                FROM Sessions_Caisse s 
+                LEFT JOIN Utilisateurs u ON s.utilisateur_id = u.id 
+                LEFT JOIN Caisses c ON s.caisse_id = c.id 
+                WHERE 1=1
+            """
+            if filtre_user_id:
+                query_sessions += f" AND s.utilisateur_id = {filtre_user_id}"
+            query_sessions += " ORDER BY s.id DESC"
+            
+            df_sessions = pd.read_sql_query(query_sessions, conn)
+            
+            if not df_sessions.empty:
+                df_sessions['Date_Calc'] = pd.to_datetime(df_sessions['date_ouverture']).dt.date
+                df_sessions_filtre = df_sessions[(df_sessions['Date_Calc'] >= date_debut) & (df_sessions['Date_Calc'] <= date_fin)].copy()
+                
+                if not df_sessions_filtre.empty:
+                    df_afficher_sec = df_sessions_filtre.drop(columns=['Date_Calc', 'id'])
+                    df_afficher_sec['date_ouverture'] = df_afficher_sec['date_ouverture'].apply(fmt_date)
+                    df_afficher_sec['date_fermeture'] = df_afficher_sec['date_fermeture'].apply(lambda x: fmt_date(x) if pd.notna(x) else "En cours...")
+                    
+                    df_afficher_sec['fond_initial'] = df_afficher_sec['fond_initial'].apply(fmt_prix)
+                    df_afficher_sec['montant_compte'] = df_afficher_sec.apply(lambda row: fmt_prix(row['montant_compte']) if row['statut'] != 'Ouverte' else "-", axis=1)
+                    df_afficher_sec['ecart'] = df_afficher_sec.apply(lambda row: fmt_prix(row['ecart']) if row['statut'] != 'Ouverte' else "-", axis=1)
+                    
+                    df_afficher_sec.rename(columns={
+                        'date_ouverture': 'Ouverture',
+                        'date_fermeture': 'Clôture',
+                        'fond_initial': f'Fond ({sys_monnaie})',
+                        'montant_compte': f'Saisi ({sys_monnaie})',
+                        'ecart': f'Écart ({sys_monnaie})',
+                        'statut': 'Statut'
+                    }, inplace=True)
+                    
+                    def color_ecart(val):
+                        try:
+                            # Nettoyage de la chaîne pour vérifier si c'est négatif ou positif
+                            v = float(str(val).replace(' ', '').replace(sys_monnaie, '').replace(',', '.'))
+                            if v < 0: return 'color: red; font-weight: bold;'
+                            elif v > 0: return 'color: green; font-weight: bold;'
+                        except: pass
+                        return ''
+                        
+                    def color_statut_sess(val):
+                        if val == 'Ouverte': return 'color: orange; font-weight: bold;'
+                        if 'Fermée' in val: return 'color: green;'
+                        return 'color: gray;'
+                        
+                    st.dataframe(
+                        df_afficher_sec.style.map(color_statut_sess, subset=['Statut'])
+                                             .map(color_ecart, subset=[f'Écart ({sys_monnaie})']),
+                        use_container_width=True, hide_index=True
+                    )
+                    
+                    st.divider()
+                    
+                    # --- Calculs globaux des pertes et profits ---
+                    sessions_fermees = df_sessions_filtre[df_sessions_filtre['statut'].str.contains('Fermée')]
+                    total_manquant = sessions_fermees[sessions_fermees['ecart'] < 0]['ecart'].sum()
+                    total_surplus = sessions_fermees[sessions_fermees['ecart'] > 0]['ecart'].sum()
+                    
+                    c_e1, c_e2, c_e3 = st.columns(3)
+                    c_e1.success(f"🟢 Surplus total constaté : **{fmt_prix(total_surplus)} {sys_monnaie}**")
+                    c_e2.error(f"🔴 Manquant total (Pertes) : **{fmt_prix(total_manquant)} {sys_monnaie}**")
+                    
+                else:
+                    st.info("Aucune session trouvée pour ces dates.")
+            else:
+                st.info("L'historique des sessions est vide.")
 
 elif menu == "Paramètres":
     st.markdown("### ⚙️ Paramètres du Système")
@@ -2073,12 +2309,11 @@ elif menu == "Stocks & Mouvements":
                 use_container_width=True
             )
 
-
     with tab_admin:
         if role_actif in ["Super Admin", "Manager"]:
             st.warning("⚠️ Attention, ces actions vont supprimer l'historique sélectionné et recalculer les stocks en fonction de ce qui reste. Ces actions sont irréversibles.")
             
-            col_b1, col_b2, col_b3 = st.columns(3)
+            col_b1, col_b2, col_b3, col_b4 = st.columns(4)
             
             if col_b1.button("🔥 Nettoyer TOUTES les VENTES", use_container_width=True):
                 cursor = conn.cursor()
@@ -2103,7 +2338,22 @@ elif menu == "Stocks & Mouvements":
                 cursor.execute("DELETE FROM Mouvements_Stock WHERE type_mouvement='Entrée (Achat)'")
                 conn.commit(); st.success("Achats effacés et stock décrémenté !"); st.rerun()
 
-            if col_b3.button("💥 REMISE À ZÉRO TOTALE (Mouvements & Stocks)", use_container_width=True):
+            if col_b3.button("🧾 Remise à zéro des RAPPORTS Z", use_container_width=True):
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM Paiements_Ticket")
+                cursor.execute("DELETE FROM Lignes_Commande")
+                cursor.execute("DELETE FROM Commandes")
+                cursor.execute("DELETE FROM sqlite_sequence WHERE name IN ('Commandes', 'Paiements_Ticket', 'Lignes_Commande')")
+                cursor.execute("DELETE FROM Mouvements_Caisse")
+                cursor.execute("DELETE FROM sqlite_sequence WHERE name='Mouvements_Caisse'")
+                cursor.execute("DELETE FROM Sessions_Caisse")
+                cursor.execute("DELETE FROM sqlite_sequence WHERE name='Sessions_Caisse'")
+                cursor.execute("UPDATE Caisses SET est_ouverte = 0")
+                conn.commit()
+                st.success("✅ Tous les rapports Z, tickets et tiroirs-caisses ont été remis à zéro !")
+                st.rerun()
+
+            if col_b4.button("💥 RAZ TOTALE (Stocks)", use_container_width=True):
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM Mouvements_Stock")
                 cursor.execute("DELETE FROM sqlite_sequence WHERE name='Mouvements_Stock'")
@@ -2117,61 +2367,223 @@ elif menu == "Stocks & Mouvements":
             st.error("Réservé à l'administrateur.")
 
 elif menu == "Clients (CRM)":
-    st.markdown("### 👥 Base de données Clients")
-    col1, col2 = st.columns([1, 1.5])
-    with col1:
-        with st.form("form_client", clear_on_submit=True):
-            nom_c = st.text_input("Nom complet *")
-            tel_c = st.text_input("Téléphone (Unique) *")
-            adr_c = st.text_area("Adresse")
-            df_zones = pd.read_sql_query("SELECT id, nom, tarif FROM Zones_Livraison ORDER BY nom", conn)
-            options_zones = {"-- Aucune --": None}
-            if not df_zones.empty:
-                for _, r in df_zones.iterrows(): options_zones[f"{r['nom']} ({fmt_prix(r['tarif'])} F)"] = r['id']
-            choix_z_client = st.selectbox("Zone Livraison :", options=list(options_zones.keys()))
-            if st.form_submit_button("Enregistrer le client") and nom_c and tel_c:
-                cursor = conn.cursor()
-                cursor.execute("SELECT id FROM Clients WHERE telephone = ?", (tel_c,))
-                if cursor.fetchone(): st.error("Ce téléphone existe déjà !")
-                else:
-                    cursor.execute("INSERT INTO Clients (nom, telephone, adresse, zone_id) VALUES (?, ?, ?, ?)", (nom_c, tel_c, adr_c, options_zones[choix_z_client]))
-                    conn.commit(); st.success("Client ajouté !"); st.rerun()
+    st.markdown("### 👥 Base de données Clients & Crédits")
+    
+    # Création des deux onglets
+    tab_annuaire, tab_credits = st.tabs(["1. Annuaire Clients", "2. Gestion des Crédits & Règlements"])
+    
+    with tab_annuaire:
+        col1, col2 = st.columns([1, 1.5])
+        with col1:
+            with st.form("form_client", clear_on_submit=True):
+                nom_c = st.text_input("Nom complet *")
+                tel_c = st.text_input("Téléphone (Unique) *")
+                adr_c = st.text_area("Adresse")
+                df_zones = pd.read_sql_query("SELECT id, nom, tarif FROM Zones_Livraison ORDER BY nom", conn)
+                options_zones = {"-- Aucune --": None}
+                if not df_zones.empty:
+                    for _, r in df_zones.iterrows(): options_zones[f"{r['nom']} ({fmt_prix(r['tarif'])} F)"] = r['id']
+                choix_z_client = st.selectbox("Zone Livraison :", options=list(options_zones.keys()))
+                if st.form_submit_button("Enregistrer le client") and nom_c and tel_c:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id FROM Clients WHERE telephone = ?", (tel_c,))
+                    if cursor.fetchone(): st.error("Ce téléphone existe déjà !")
+                    else:
+                        cursor.execute("INSERT INTO Clients (nom, telephone, adresse, zone_id) VALUES (?, ?, ?, ?)", (nom_c, tel_c, adr_c, options_zones[choix_z_client]))
+                        conn.commit(); st.success("Client ajouté !"); st.rerun()
 
-        st.divider()
-        df_clients = pd.read_sql_query("SELECT id, nom, telephone, adresse, zone_id FROM Clients ORDER BY nom", conn)
-        if not df_clients.empty:
-            df_clients["label"] = df_clients["nom"] + " (" + df_clients["telephone"] + ")"
-            cli_dict = dict(zip(df_clients["label"], df_clients["id"]))
-            choix_cli = st.selectbox("Gérer client :", options=list(cli_dict.keys()))
-            id_cli = int(cli_dict[choix_cli])
-            info_cli = df_clients[df_clients["id"] == id_cli].iloc[0]
-            with st.expander("✏️ Modifier"):
-                with st.form("edit_cli"):
-                    e_nom = st.text_input("Nom", value=info_cli["nom"])
-                    e_tel = st.text_input("Téléphone", value=info_cli["telephone"])
-                    e_adr = st.text_input("Adresse", value=(info_cli["adresse"] if info_cli["adresse"] else ""))
-                    zone_actuelle = None
-                    if not pd.isna(info_cli['zone_id']):
-                        for key, val in options_zones.items():
-                            if val == info_cli['zone_id']: zone_actuelle = key
-                    idx_z = list(options_zones.keys()).index(zone_actuelle) if zone_actuelle in options_zones else 0
-                    e_zone = st.selectbox("Zone", options=list(options_zones.keys()), index=idx_z)
-                    if st.form_submit_button("Enregistrer"): cursor = conn.cursor(); cursor.execute("UPDATE Clients SET nom=?, telephone=?, adresse=?, zone_id=? WHERE id=?", (e_nom, e_tel, e_adr, options_zones[e_zone], id_cli)); conn.commit(); st.rerun()
-            if role_actif == "Manager":
-                with st.expander("🗑️ Supprimer"):
-                    with st.form("del_cli"):
-                        if st.form_submit_button("Confirmer"):
-                            cursor = conn.cursor(); cursor.execute("SELECT id FROM Commandes WHERE client_id = ?", (id_cli,))
-                            if cursor.fetchone(): st.error("❌ Historique existant.")
-                            else: cursor.execute("DELETE FROM Clients WHERE id = ?", (id_cli,)); conn.commit(); st.rerun()
-    with col2:
-        if not df_clients.empty:
-            df_vue = pd.read_sql_query("SELECT c.id, c.nom, c.telephone, c.adresse, z.nom as Zone FROM Clients c LEFT JOIN Zones_Livraison z ON c.zone_id = z.id ORDER BY c.nom", conn)
-            df_vue["N°"] = df_vue["id"].apply(lambda x: f"CLI-{x:04d}")
-            st.dataframe(df_vue[["N°", "nom", "telephone", "adresse", "Zone"]], use_container_width=True, hide_index=True)
+            st.divider()
+            df_clients = pd.read_sql_query("SELECT id, nom, telephone, adresse, zone_id FROM Clients ORDER BY nom", conn)
+            if not df_clients.empty:
+                df_clients["label"] = df_clients["nom"] + " (" + df_clients["telephone"] + ")"
+                cli_dict = dict(zip(df_clients["label"], df_clients["id"]))
+                choix_cli = st.selectbox("Gérer client :", options=list(cli_dict.keys()))
+                id_cli = int(cli_dict[choix_cli])
+                info_cli = df_clients[df_clients["id"] == id_cli].iloc[0]
+                with st.expander("✏️ Modifier"):
+                    with st.form("edit_cli"):
+                        e_nom = st.text_input("Nom", value=info_cli["nom"])
+                        e_tel = st.text_input("Téléphone", value=info_cli["telephone"])
+                        e_adr = st.text_input("Adresse", value=(info_cli["adresse"] if info_cli["adresse"] else ""))
+                        zone_actuelle = None
+                        if not pd.isna(info_cli['zone_id']):
+                            for key, val in options_zones.items():
+                                if val == info_cli['zone_id']: zone_actuelle = key
+                        idx_z = list(options_zones.keys()).index(zone_actuelle) if zone_actuelle in options_zones else 0
+                        e_zone = st.selectbox("Zone", options=list(options_zones.keys()), index=idx_z)
+                        if st.form_submit_button("Enregistrer"): cursor = conn.cursor(); cursor.execute("UPDATE Clients SET nom=?, telephone=?, adresse=?, zone_id=? WHERE id=?", (e_nom, e_tel, e_adr, options_zones[e_zone], id_cli)); conn.commit(); st.rerun()
+                if role_actif in ["Manager", "Super Admin"]:
+                    with st.expander("🗑️ Supprimer"):
+                        with st.form("del_cli"):
+                            if st.form_submit_button("Confirmer"):
+                                cursor = conn.cursor(); cursor.execute("SELECT id FROM Commandes WHERE client_id = ?", (id_cli,))
+                                if cursor.fetchone(): st.error("❌ Historique existant.")
+                                else: cursor.execute("DELETE FROM Clients WHERE id = ?", (id_cli,)); conn.commit(); st.rerun()
+        with col2:
+            if not df_clients.empty:
+                df_vue = pd.read_sql_query("SELECT c.id, c.nom, c.telephone, c.adresse, z.nom as Zone FROM Clients c LEFT JOIN Zones_Livraison z ON c.zone_id = z.id ORDER BY c.nom", conn)
+                df_vue["N°"] = df_vue["id"].apply(lambda x: f"CLI-{x:04d}")
+                st.dataframe(df_vue[["N°", "nom", "telephone", "adresse", "Zone"]], use_container_width=True, hide_index=True)
+
+    with tab_credits:
+        st.markdown("#### 💰 Recouvrement des Dettes")
+        
+        # --- CORRECTION : LE MESSAGE S'AFFICHE TOUT EN HAUT ---
+        if "msg_recouvrement" in st.session_state:
+            st.success(st.session_state.msg_recouvrement, icon="✅")
+            del st.session_state.msg_recouvrement
+        # ------------------------------------------------------
+        
+        # On cherche uniquement les clients qui ont des tickets "À Crédit"
+        df_debiteurs = pd.read_sql_query("""
+            SELECT DISTINCT cl.id, cl.nom, cl.telephone 
+            FROM Commandes c 
+            JOIN Clients cl ON c.client_id = cl.id 
+            WHERE c.statut = 'À Crédit'
+            ORDER BY cl.nom
+        """, conn)
+        
+        if df_debiteurs.empty:
+            st.success("🎉 Excellente nouvelle : Aucun client n'a de crédit en cours !")
+        else:
+            df_debiteurs["label"] = df_debiteurs["nom"] + " (" + df_debiteurs["telephone"] + ")"
+            dict_debiteurs = dict(zip(df_debiteurs["label"], df_debiteurs["id"]))
+            
+            c_deb1, c_deb2 = st.columns([1, 2])
+            choix_debiteur = c_deb1.selectbox("Sélectionnez le client :", options=list(dict_debiteurs.keys()))
+            id_debiteur = dict_debiteurs[choix_debiteur]
+            
+            # On récupère tous ses tickets impayés
+            df_tickets_credit = pd.read_sql_query("""
+                SELECT id as 'N° Ticket', date_creation as 'Date', total as 'Total TTC' 
+                FROM Commandes 
+                WHERE client_id = ? AND statut = 'À Crédit'
+                ORDER BY id ASC
+            """, conn, params=(id_debiteur,))
+            
+            dette_totale = 0.0
+            tickets_a_afficher = []
+            
+            # On calcule le reste à payer exact pour chaque ticket
+            for _, row in df_tickets_credit.iterrows():
+                t_id = row['N° Ticket']
+                total_t = float(row['Total TTC'])
+                df_paye = pd.read_sql_query("SELECT SUM(montant) as deja_paye FROM Paiements_Ticket WHERE commande_id = ? AND methode != 'À Crédit'", conn, params=(t_id,))
+                deja_paye = float(df_paye.iloc[0]['deja_paye']) if pd.notna(df_paye.iloc[0]['deja_paye']) else 0.0
+                reste_du = total_t - deja_paye
+                
+                if reste_du > 0:
+                    dette_totale += reste_du
+                    tickets_a_afficher.append({
+                        "N° Ticket": t_id,
+                        "Date": fmt_date(row['Date']),
+                        "Total Ticket": f"{fmt_prix(total_t)}",
+                        "Reste à Payer": reste_du
+                    })
+                    
+            c_deb2.markdown(f"<h3 style='color: #ff4b4b; text-align: right;'>Dette Totale : {fmt_prix(dette_totale)} {sys_monnaie if 'sys_monnaie' in globals() else 'FCFA'}</h3>", unsafe_allow_html=True)
+            
+            if tickets_a_afficher:
+                df_aff = pd.DataFrame(tickets_a_afficher)
+                df_aff['Reste à Payer'] = df_aff['Reste à Payer'].apply(lambda x: f"{fmt_prix(x)} {sys_monnaie if 'sys_monnaie' in globals() else 'FCFA'}")
+                st.dataframe(df_aff, use_container_width=True, hide_index=True)
+                
+                st.divider()
+
+                # --------------------------------------------------------------
+                
+                df_paiement = pd.read_sql_query("SELECT nom FROM Methodes_Paiement WHERE nom != 'À Crédit' ORDER BY nom", conn)
+                options_paiement = df_paiement["nom"].tolist()
+                
+                # --- SUPPRESSION DU FORMULAIRE POUR AVOIR LE CALCUL EN DIRECT ---
+                col_p1, col_p2, col_p3 = st.columns([1.5, 1, 1])
+                dict_t_opts = {"Règlement Global (Solder les plus anciens d'abord)": "GLOBAL"}
+                
+                dict_restes_bruts = {"GLOBAL": dette_totale}
+                for t in tickets_a_afficher: 
+                    dict_t_opts[f"Régler uniquement le Ticket #{t['N° Ticket']}"] = t['N° Ticket']
+                    dict_restes_bruts[t['N° Ticket']] = float(str(t['Reste à Payer']).replace(sys_monnaie if 'sys_monnaie' in globals() else 'FCFA', '').replace(' ', '').replace(',', '.'))
+                    
+                cible_paiement = col_p1.selectbox("Que souhaitez-vous régler ?", options=list(dict_t_opts.keys()), key="crm_cible")
+                methode_reglement = col_p2.selectbox("Mode de paiement", options=options_paiement, key="crm_mode")
+                
+                montant_reglement = col_p3.number_input("Montant reçu", min_value=0.0, value=float(dette_totale), step=1000.0, key="crm_mnt")
+                
+                cible_id = dict_t_opts[cible_paiement]
+                dette_cible = dict_restes_bruts[cible_id]
+                monnaie_aff = sys_monnaie if 'sys_monnaie' in globals() else 'FCFA'
+                
+                # --- AFFICHAGE EN DIRECT AVANT VALIDATION (Comme dans l'historique) ---
+                if montant_reglement > dette_cible:
+                    if methode_reglement == "Espèces":
+                        st.success(f"🔄 **MONNAIE À RENDRE : {fmt_prix(montant_reglement - dette_cible)} {monnaie_aff}**")
+                    else:
+                        st.info(f"🎁 **Pourboire généré : {fmt_prix(montant_reglement - dette_cible)} {monnaie_aff}**")
+                # ----------------------------------------------------------------------
+                
+                if st.button("✅ Valider l'encaissement", type="primary", use_container_width=True):
+                    if montant_reglement <= 0:
+                        st.error("Le montant doit être supérieur à 0.")
+                    else:
+                        cursor = conn.cursor()
+                        dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        montant_utile = montant_reglement
+                        pourboire_global = 0.0
+                        
+                        if montant_reglement > dette_cible:
+                            if methode_reglement == "Espèces":
+                                montant_utile = dette_cible 
+                            else:
+                                pourboire_global = montant_reglement - dette_cible
+                                montant_utile = dette_cible
+                        
+                        montant_a_distribuer = montant_utile
+                        tickets_a_traiter = tickets_a_afficher if cible_id == "GLOBAL" else [t for t in tickets_a_afficher if t['N° Ticket'] == cible_id]
+                        
+                        for t in tickets_a_traiter:
+                            if montant_a_distribuer <= 0.01: break
+                            
+                            t_id = t['N° Ticket']
+                            reste_ticket = dict_restes_bruts[t_id]
+                            montant_affecte = min(montant_a_distribuer, reste_ticket)
+                            montant_a_distribuer -= montant_affecte
+                            
+                            p_pourboire = pourboire_global if montant_affecte >= (reste_ticket - 0.01) and montant_a_distribuer <= 0.01 else 0.0
+                            cursor.execute("INSERT INTO Paiements_Ticket (commande_id, methode, montant, date_paiement, utilisateur_id, pourboire) VALUES (?, ?, ?, ?, ?, ?)", (t_id, methode_reglement, montant_affecte, dt_now, st.session_state.utilisateur["id"], p_pourboire))
+                            
+                            if montant_affecte >= (reste_ticket - 0.01):
+                                cursor.execute("UPDATE Commandes SET statut = 'Payée', date_paiement = ?, methode_paiement = ? WHERE id = ?", (dt_now, methode_reglement, t_id))
+                                cursor.execute("UPDATE Paiements_Ticket SET methode = methode || ' (Réglé)' WHERE commande_id = ? AND methode = 'À Crédit'", (t_id,))
+                        
+                        if methode_reglement == "Espèces":
+                            motif_mvt = f"Règlement Crédit Client : {choix_debiteur.split('(')[0].strip()}"
+                            cursor.execute("INSERT INTO Mouvements_Caisse (type_mouvement, motif, montant, utilisateur_id, date_mvt) VALUES ('Entrée', ?, ?, ?, ?)", (motif_mvt, montant_utile, st.session_state.utilisateur["id"], dt_now))
+                                
+                        conn.commit()
+                        
+                        # --- NOUVEAU : LE MESSAGE DE SUCCÈS GARDE LA MONNAIE EN MÉMOIRE ---
+                        if montant_reglement > dette_cible and methode_reglement == "Espèces":
+                            st.session_state.msg_recouvrement = f"✅ Règlement enregistré ! 🔄 **N'OUBLIEZ PAS LA MONNAIE À RENDRE : {fmt_prix(montant_reglement - dette_cible)} {monnaie_aff}**"
+                        elif montant_reglement > dette_cible:
+                            st.session_state.msg_recouvrement = f"✅ Règlement enregistré avec **{fmt_prix(montant_reglement - dette_cible)} {monnaie_aff} de pourboire** !"
+                        else:
+                            st.session_state.msg_recouvrement = f"✅ Règlement de {fmt_prix(montant_utile)} {monnaie_aff} enregistré avec succès !"
+                            
+                        st.rerun()
 
 elif menu == "Prise de Commande":
     cursor = conn.cursor()
+    
+    # --- MISE À JOUR AUTO DE LA BASE DE DONNÉES POUR LA REMISE ---
+    cursor.execute("PRAGMA table_info(Commandes)")
+    if "remise" not in [c[1] for c in cursor.fetchall()]:
+        cursor.execute("ALTER TABLE Commandes ADD COLUMN remise REAL DEFAULT 0")
+        conn.commit()
+        
+    if "remise_ticket" not in st.session_state: 
+        st.session_state.remise_ticket = 0.0
+    # -------------------------------------------------------------
     
     col_titre, col_synchro = st.columns([4, 1])
     with col_titre:
@@ -2196,7 +2608,10 @@ elif menu == "Prise de Commande":
 
             with st.expander("📝 Infos Commande (Client, Zone...)", expanded=not panier_actif):
                 col_type, col_info = st.columns([1, 1])
+                
                 choix_types = ["Caisse", "Livraison"]
+                if st.session_state.radio_type_cmd not in choix_types:
+                    st.session_state.radio_type_cmd = "Caisse"
                 idx_type = choix_types.index(st.session_state.radio_type_cmd) if st.session_state.radio_type_cmd in choix_types else 0
                 type_cmd = col_type.radio("Type :", choix_types, index=idx_type, disabled=panier_actif)
                 st.session_state.radio_type_cmd = type_cmd
@@ -2214,12 +2629,12 @@ elif menu == "Prise de Commande":
                         options_clients.append(label)
                         dict_clients[label] = row["id"]
 
-                    try: 
-                        default_client_idx = options_clients.index(st.session_state.active_client_name)
-                    except ValueError: 
-                        default_client_idx = 0
+                    try:
+                        idx_client = options_clients.index(st.session_state.active_client_name)
+                    except ValueError:
+                        idx_client = 0
 
-                    choix_client = st.selectbox("Client :", options_clients, index=default_client_idx)
+                    choix_client = st.selectbox("Client :", options_clients, index=idx_client)
                     st.session_state.active_client_name = choix_client
                     client_zone_id_db = None
 
@@ -2274,8 +2689,11 @@ elif menu == "Prise de Commande":
                                 st.session_state.commande_id_en_cours = cmd_id_load
                                 st.session_state.paiements_partiels = []
                                 st.session_state.pourboire_ticket = 0.0
-                                cursor.execute("SELECT client_id FROM Commandes WHERE id = ?", (cmd_id_load,))
+                                
+                                cursor.execute("SELECT client_id, remise FROM Commandes WHERE id = ?", (cmd_id_load,))
                                 c_id_res = cursor.fetchone()
+                                st.session_state.remise_ticket = float(c_id_res[1]) if c_id_res and pd.notna(c_id_res[1]) else 0.0
+                                
                                 if c_id_res and c_id_res[0]:
                                     c_id = c_id_res[0]
                                     label_found = "Passager (Anonyme)"
@@ -2296,7 +2714,8 @@ elif menu == "Prise de Commande":
                                     qte_ret_env = int(row["quantite_retour_envoyee"]) if not pd.isna(row.get("quantite_retour_envoyee")) else 0
 
                                     if p_id not in st.session_state.panier: 
-                                        st.session_state.panier[p_id] = {"nom": row["nom"], "prix_base": prix_b, "qte": 0, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row["applique_tva"]), "tva_rate": float(row["tva_rate"])}
+                                        # On utilise le prix de la ligne sauvegardée
+                                        st.session_state.panier[p_id] = {"nom": row["nom"], "prix_base": prix_ligne if prix_ligne > 0 else prix_b, "qte": 0, "qte_retour": 0, "qte_offert": 0, "qte_envoyee": 0, "qte_offert_envoyee": 0, "qte_retour_envoyee": 0, "applique_tva": int(row["applique_tva"]), "tva_rate": float(row["tva_rate"])}
                                     if qte > 0:
                                         if prix_ligne == 0: 
                                             st.session_state.panier[p_id]["qte_offert"] += qte
@@ -2327,8 +2746,13 @@ elif menu == "Prise de Commande":
                         cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (st.session_state.commande_id_en_cours,))
                         cursor.execute("DELETE FROM Commandes WHERE id = ?", (st.session_state.commande_id_en_cours,))
                         conn.commit()
-                        st.session_state.commande_id_en_cours = None
+                        
+                        st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
+                        st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
+                        st.session_state.remise_ticket = 0.0
                         st.session_state.active_client_name = "Passager (Anonyme)"
+                        st.session_state.radio_type_cmd = "Caisse"
+                        
                         st.success("Ticket supprimé de la base de données !")
                         st.rerun()
             else:
@@ -2375,7 +2799,14 @@ elif menu == "Prise de Commande":
                             st.session_state[f"in_qte_{p_id}"] = 0.0
                             st.rerun()
                             
-                        c_prix.markdown(f"<div style='text-align: right; padding-top: 5px; font-size: 0.9em;'>{fmt_prix(sous_total)} F</div>", unsafe_allow_html=True)
+                        # --- MODIFICATION : PRIX UNITAIRE ÉDITABLE ---
+                        nouveau_pu = c_prix.number_input("PU", min_value=0.0, value=float(item["prix_base"]), step=500.0, key=f"pu_{p_id}", label_visibility="collapsed")
+                        if nouveau_pu != item["prix_base"]:
+                            item["prix_base"] = nouveau_pu
+                            st.rerun()
+                        if item["qte"] > 1:
+                            c_prix.markdown(f"<div style='text-align: right; font-size: 0.75em; color: gray; margin-top:-10px;'>= {fmt_prix(item['prix_base'] * item['qte'])} F</div>", unsafe_allow_html=True)
+                        # ---------------------------------------------
 
                     if item.get("qte_offert", 0) > 0:
                         c_nom_o, c_off_o, c_ret_o, c_qte_o, c_plus_o, c_del_o, c_prix_o = st.columns(cols_ratio)
@@ -2431,6 +2862,17 @@ elif menu == "Prise de Commande":
 
                 total_produits = total_commande
                 st.divider()
+                
+                # --- MODIFICATION : REMISE GLOBALE ---
+                c_rem_lbl, c_rem_val = st.columns([3, 1.5])
+                c_rem_lbl.markdown("<div style='padding-top: 5px; font-weight: bold; color: #ff9800;'>📉 Remise Globale (FCFA) :</div>", unsafe_allow_html=True)
+                nouvelle_remise = c_rem_val.number_input("Remise", min_value=0.0, max_value=float(total_commande), value=float(st.session_state.remise_ticket), step=500.0, label_visibility="collapsed")
+                if nouvelle_remise != st.session_state.remise_ticket:
+                    st.session_state.remise_ticket = nouvelle_remise
+                    st.rerun()
+                    
+                total_commande -= st.session_state.remise_ticket
+                # -------------------------------------
                 
                 if type_cmd == "Livraison" and frais_livraison_actuel > 0:
                     c_nom_l, _, _, _, _, _, c_prix_l = st.columns(cols_ratio)
@@ -2519,9 +2961,12 @@ elif menu == "Prise de Commande":
                             cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (st.session_state.commande_id_en_cours,))
                             cursor.execute("DELETE FROM Commandes WHERE id = ?", (st.session_state.commande_id_en_cours,))
                             conn.commit()
+                            
                     st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
                     st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
+                    st.session_state.remise_ticket = 0.0
                     st.session_state.active_client_name = "Passager (Anonyme)"
+                    st.session_state.radio_type_cmd = "Caisse"
                     st.rerun()
 
                 if col_btn_att.button("⏸️ Attente", use_container_width=True):
@@ -2534,11 +2979,11 @@ elif menu == "Prise de Commande":
                         else: client_id_db = exists[0]
 
                     if st.session_state.commande_id_en_cours is None:
-                        cursor.execute("INSERT INTO Commandes (type_commande, statut, total, pourboire, nom_client, telephone, adresse, client_id, utilisateur_id, zone_id, frais_livraison) VALUES (?, 'En attente', ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
+                        cursor.execute("INSERT INTO Commandes (type_commande, statut, total, pourboire, remise, nom_client, telephone, adresse, client_id, utilisateur_id, zone_id, frais_livraison) VALUES (?, 'En attente', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, total_commande, st.session_state.pourboire_ticket, st.session_state.remise_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
                         cmd_id = cursor.lastrowid
                     else:
                         cmd_id = st.session_state.commande_id_en_cours
-                        cursor.execute("UPDATE Commandes SET total = ?, pourboire = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ? WHERE id = ?", (total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, cmd_id))
+                        cursor.execute("UPDATE Commandes SET total = ?, pourboire = ?, remise = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ? WHERE id = ?", (total_commande, st.session_state.pourboire_ticket, st.session_state.remise_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, cmd_id))
                         cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (cmd_id,))
 
                     for p_id, item in st.session_state.panier.items():
@@ -2547,9 +2992,13 @@ elif menu == "Prise de Commande":
                         if item.get("qte_retour", 0) > 0: cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, 0, 0, ?)", (cmd_id, p_id, -item["qte_retour"], item["prix_base"], -item["prix_base"] * item["qte_retour"], item.get("qte_retour_envoyee", 0)))
 
                     conn.commit()
+                    
                     st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
                     st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
+                    st.session_state.remise_ticket = 0.0
                     st.session_state.active_client_name = "Passager (Anonyme)"
+                    st.session_state.radio_type_cmd = "Caisse"
+                    
                     st.success("Ticket mis en attente !")
                     st.rerun()
 
@@ -2559,6 +3008,10 @@ elif menu == "Prise de Commande":
                         
                         has_a_credit = any(p["methode"] == "À Crédit" for p in st.session_state.paiements_partiels)
                         is_credit = has_a_credit
+                        
+                        if is_credit and choix_client == "Passager (Anonyme)":
+                            st.error("⛔ Impossible : Vous devez obligatoirement sélectionner ou créer un client pour valider une vente à crédit.")
+                            st.stop()
                         
                         if choix_client == "+ Nouveau Client..." and client_tel:
                             cursor.execute("SELECT id FROM Clients WHERE telephone = ?", (client_tel,))
@@ -2573,11 +3026,11 @@ elif menu == "Prise de Commande":
                         methode_principale = "Multiple" if len(st.session_state.paiements_partiels) > 1 else st.session_state.paiements_partiels[0]["methode"]                            
 
                         if st.session_state.commande_id_en_cours is None:
-                            cursor.execute("INSERT INTO Commandes (type_commande, statut, total, pourboire, nom_client, telephone, adresse, client_id, methode_paiement, date_paiement, utilisateur_id, zone_id, frais_livraison) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, statut_cmd, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, methode_principale, date_paie_sql, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
+                            cursor.execute("INSERT INTO Commandes (type_commande, statut, total, pourboire, remise, nom_client, telephone, adresse, client_id, methode_paiement, date_paiement, utilisateur_id, zone_id, frais_livraison) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, statut_cmd, total_commande, st.session_state.pourboire_ticket, st.session_state.remise_ticket, client_nom, client_tel, client_adr, client_id_db, methode_principale, date_paie_sql, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
                             cmd_id = cursor.lastrowid
                         else:
                             cmd_id = st.session_state.commande_id_en_cours
-                            cursor.execute("UPDATE Commandes SET statut = ?, total = ?, pourboire = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, methode_paiement = ?, date_paiement = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ? WHERE id = ?", (statut_cmd, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, methode_principale, date_paie_sql, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, cmd_id))
+                            cursor.execute("UPDATE Commandes SET statut = ?, total = ?, pourboire = ?, remise = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, methode_paiement = ?, date_paiement = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ? WHERE id = ?", (statut_cmd, total_commande, st.session_state.pourboire_ticket, st.session_state.remise_ticket, client_nom, client_tel, client_adr, client_id_db, methode_principale, date_paie_sql, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, cmd_id))
                             cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (cmd_id,))
                             cursor.execute("DELETE FROM Paiements_Ticket WHERE commande_id = ?", (cmd_id,))
                         
@@ -2588,7 +3041,7 @@ elif menu == "Prise de Commande":
                                 if pt["methode"] == "Espèces" and pt["montant"] >= rendu_restant:
                                     pt["montant"] -= rendu_restant; rendu_restant = 0; break
                         
-                        for p_f in montants_finaux: cursor.execute("INSERT INTO Paiements_Ticket (commande_id, methode, montant, date_paiement) VALUES (?, ?, ?, ?)", (cmd_id, p_f["methode"], p_f["montant"], date_paie_sql))
+                        for p_f in montants_finaux: cursor.execute("INSERT INTO Paiements_Ticket (commande_id, methode, montant, date_paiement, utilisateur_id) VALUES (?, ?, ?, ?, ?)", (cmd_id, p_f["methode"], p_f["montant"], date_paie_sql, st.session_state.utilisateur["id"]))
 
 
                         params = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
@@ -2681,16 +3134,29 @@ elif menu == "Prise de Commande":
 
                         ticket_str += "-" * 42 + "\n"
                         
-                        if type_cmd == "Livraison" and frais_livraison_actuel > 0:
-                            ticket_str += f"TOTAL HT : {fmt_prix(total_ht_global)} {sys_monnaie}".rjust(42) + "\n"
-                            ticket_str += f"TOTAL TVA : {fmt_prix(tva_totale)} {sys_monnaie}".rjust(42) + "\n"
-                            ticket_str += f"FRAIS LIVRAISON : {fmt_prix(frais_livraison_actuel)} {sys_monnaie}".rjust(42) + "\n"
-                            ticket_str += f"NET A PAYER : {fmt_prix(total_commande)} {sys_monnaie}".rjust(42) + "\n"
+                        total_ttc_brut = total_ht_global + tva_totale
+                        remise_ttc = st.session_state.remise_ticket
+                        
+                        if remise_ttc > 0 and total_ttc_brut > 0:
+                            ratio_remise = remise_ttc / total_ttc_brut
+                            remise_ht = total_ht_global * ratio_remise
+                            remise_tva = tva_totale * ratio_remise
+                            
+                            total_ht_net = total_ht_global - remise_ht
+                            tva_net = tva_totale - remise_tva
+                            
+                            ticket_str += f"TOTAL HT BRUT : {fmt_prix(total_ht_global)} {sys_monnaie}".rjust(42) + "\n"
+                            ticket_str += f"REMISE HT : - {fmt_prix(remise_ht)} {sys_monnaie}".rjust(42) + "\n"
+                            ticket_str += f"TOTAL HT NET : {fmt_prix(total_ht_net)} {sys_monnaie}".rjust(42) + "\n"
+                            ticket_str += f"TVA NETTE : {fmt_prix(tva_net)} {sys_monnaie}".rjust(42) + "\n"
                         else:
                             ticket_str += f"TOTAL HT : {fmt_prix(total_ht_global)} {sys_monnaie}".rjust(42) + "\n"
                             ticket_str += f"TOTAL TVA : {fmt_prix(tva_totale)} {sys_monnaie}".rjust(42) + "\n"
-                            ticket_str += f"NET A PAYER : {fmt_prix(total_commande)} {sys_monnaie}".rjust(42) + "\n"
-                                
+                            
+                        if type_cmd == "Livraison" and frais_livraison_actuel > 0:
+                            ticket_str += f"FRAIS LIVRAISON : {fmt_prix(frais_livraison_actuel)} {sys_monnaie}".rjust(42) + "\n"
+                            
+                        ticket_str += f"NET A PAYER : {fmt_prix(total_commande)} {sys_monnaie}".rjust(42) + "\n"
                         ticket_str += "-" * 42 + "\n"
                         
                         for pf in st.session_state.paiements_partiels:
@@ -2771,7 +3237,9 @@ elif menu == "Prise de Commande":
 
                         st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
                         st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
+                        st.session_state.remise_ticket = 0.0
                         st.session_state.active_client_name = "Passager (Anonyme)"
+                        st.session_state.radio_type_cmd = "Caisse"
                         
                         if statut_cmd == "À Crédit": 
                             st.success(f"Vente enregistrée en CRÉDIT.{msg_print}")
@@ -2790,11 +3258,11 @@ elif menu == "Prise de Commande":
                             client_id_db = exists[0]
 
                     if st.session_state.commande_id_en_cours is None:
-                        cursor.execute("INSERT INTO Commandes (type_commande, statut, total, pourboire, nom_client, telephone, adresse, client_id, utilisateur_id, zone_id, frais_livraison) VALUES (?, 'En attente', ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
+                        cursor.execute("INSERT INTO Commandes (type_commande, statut, total, pourboire, remise, nom_client, telephone, adresse, client_id, utilisateur_id, zone_id, frais_livraison) VALUES (?, 'En attente', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (type_cmd, total_commande, st.session_state.pourboire_ticket, st.session_state.remise_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel))
                         cmd_id = cursor.lastrowid
                     else:
                         cmd_id = st.session_state.commande_id_en_cours
-                        cursor.execute("UPDATE Commandes SET total = ?, pourboire = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ? WHERE id = ?", (total_commande, st.session_state.pourboire_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, cmd_id))
+                        cursor.execute("UPDATE Commandes SET total = ?, pourboire = ?, remise = ?, nom_client = ?, telephone = ?, adresse = ?, client_id = ?, utilisateur_id = ?, zone_id = ?, frais_livraison = ? WHERE id = ?", (total_commande, st.session_state.pourboire_ticket, st.session_state.remise_ticket, client_nom, client_tel, client_adr, client_id_db, st.session_state.utilisateur["id"], zone_id_selected, frais_livraison_actuel, cmd_id))
                         cursor.execute("DELETE FROM Lignes_Commande WHERE commande_id = ?", (cmd_id,))
 
                     bons_par_depot = {}
@@ -2868,20 +3336,20 @@ elif menu == "Prise de Commande":
 
                     st.session_state.panier, st.session_state.commande_id_en_cours = {}, None
                     st.session_state.paiements_partiels, st.session_state.pourboire_ticket = [], 0.0
+                    st.session_state.remise_ticket = 0.0
                     st.session_state.active_client_name = "Passager (Anonyme)"
+                    st.session_state.radio_type_cmd = "Caisse"
                     st.success(f"Ticket mis en attente. {msg_print}")
                     st.rerun()
 
         with col_menu:
             st.markdown("#### 🍔 Menu & Produits")
             
-            # 1. Barre de recherche globale et Douchette EN HAUT
             df_all_prods = pd.read_sql_query("SELECT p.id, p.nom, p.prix, p.applique_tva, p.code_barre, c.tva as tva_rate FROM Produits p JOIN Categories c ON p.categorie_id = c.id WHERE p.est_vendable = 1 ORDER BY p.nom", conn)
             if not df_all_prods.empty:
                 dict_all_prods = {}
                 for _, row in df_all_prods.iterrows():
                     lbl_code = f"[{row['code_barre']}] " if pd.notna(row['code_barre']) and str(row['code_barre']).strip() != "" else ""
-                    # MODIFICATION ICI : On utilise la variable sys_monnaie
                     dict_all_prods[f"{lbl_code}{row['nom']} - {fmt_prix(row['prix'])} {sys_monnaie}"] = row['id']
                     
                 with st.form("form_recherche_globale", clear_on_submit=True):
@@ -2908,8 +3376,6 @@ elif menu == "Prise de Commande":
                             st.rerun()
 
             st.markdown("<hr style='margin:15px 0;'>", unsafe_allow_html=True)
-            
-            # 2. Navigation par Famille (Catégories) EN BAS
             st.markdown("##### 📁 Navigation par Famille")
             
             df_categories = pd.read_sql_query("SELECT id, nom FROM Categories ORDER BY nom", conn)
@@ -2957,7 +3423,6 @@ elif menu == "Prise de Commande":
                             
                             for index, row in group.reset_index().iterrows():
                                 col_idx = index % 4
-                                # MODIFICATION ICI : On utilise la variable sys_monnaie sur les boutons
                                 if cols_produits[col_idx].button(f"{row['nom']}\n{fmt_prix(row['prix'])} {sys_monnaie}", key=f"btn_prod_{row['id']}", use_container_width=True):
                                     p_id = int(row["id"])
                                     if p_id in st.session_state.panier: 
@@ -2971,7 +3436,12 @@ elif menu == "Prise de Commande":
         with tab_historique:
             st.subheader("📜 Historique des Tickets")
             df_historique = pd.read_sql_query("""
-                SELECT c.id as 'N°', c.date_creation as 'Date Création', c.date_paiement as 'Encaissement', c.type_commande as 'Type', COALESCE(cl.nom, c.nom_client, '-') as 'Client', u.nom as 'Caissier', COALESCE(c.methode_paiement, '-') as 'Paiement', 
+                SELECT c.id as 'N°', c.date_creation as 'Date Création', c.date_paiement as 'Encaissement', c.type_commande as 'Type', COALESCE(cl.nom, c.nom_client, '-') as 'Client', u.nom as 'Caissier', 
+                CASE 
+                    WHEN c.statut = 'Payée' AND c.methode_paiement = 'À Crédit' THEN 
+                        COALESCE((SELECT GROUP_CONCAT(DISTINCT methode) FROM Paiements_Ticket WHERE commande_id = c.id AND methode NOT LIKE '%À Crédit%'), 'Régularisé')
+                    ELSE COALESCE(c.methode_paiement, '-') 
+                END as 'Paiement', 
                 COALESCE((SELECT SUM(lc.sous_total - (lc.sous_total / (1 + cat.tva / 100))) FROM Lignes_Commande lc JOIN Produits p ON lc.produit_id = p.id JOIN Categories cat ON p.categorie_id = cat.id WHERE lc.commande_id = c.id AND p.applique_tva = 1 AND cat.tva > 0), 0) as 'TVA',
                 c.total as 'Total TTC', c.pourboire as 'Pourboire', c.statut as 'Statut', c.utilisateur_id 
                 FROM Commandes c 
@@ -3100,7 +3570,7 @@ elif menu == "Prise de Commande":
                     if st.session_state.credit_ticket_id != ticket_id_int:
                         st.session_state.paiements_credit, st.session_state.pourboire_credit, st.session_state.credit_ticket_id = [], 0.0, ticket_id_int
 
-                    info_cmd = pd.read_sql_query("SELECT c.type_commande, c.methode_paiement, c.statut, c.nom_client, c.telephone, c.adresse, c.client_id, c.total, c.pourboire, c.date_creation, c.date_paiement, c.frais_livraison, u.nom as nom_serveur, z.nom as nom_zone FROM Commandes c LEFT JOIN Utilisateurs u ON c.utilisateur_id = u.id LEFT JOIN Zones_Livraison z ON c.zone_id = z.id WHERE c.id = ?", conn, params=(ticket_id_int,)).iloc[0]
+                    info_cmd = pd.read_sql_query("SELECT c.type_commande, c.methode_paiement, c.statut, c.nom_client, c.telephone, c.adresse, c.client_id, c.total, c.pourboire, c.remise, c.date_creation, c.date_paiement, c.frais_livraison, u.nom as nom_serveur, z.nom as nom_zone FROM Commandes c LEFT JOIN Utilisateurs u ON c.utilisateur_id = u.id LEFT JOIN Zones_Livraison z ON c.zone_id = z.id WHERE c.id = ?", conn, params=(ticket_id_int,)).iloc[0]
                     df_paiement = pd.read_sql_query("SELECT nom FROM Methodes_Paiement ORDER BY nom", conn)
                     options_paiement_admin = df_paiement["nom"].tolist()
 
@@ -3174,7 +3644,7 @@ elif menu == "Prise de Commande":
                                             pt["montant"] -= rendu_restant; rendu_restant = 0; break
                                             
                                 cursor.execute("UPDATE Paiements_Ticket SET methode = methode || ' (Réglé)' WHERE commande_id=? AND methode IN ('À Crédit')", (ticket_id_int,))
-                                for p_f in montants_finaux: cursor.execute("INSERT INTO Paiements_Ticket (commande_id, methode, montant, date_paiement) VALUES (?, ?, ?, ?)", (ticket_id_int, p_f["methode"], p_f["montant"], p_f["date"]))
+                                for p_f in montants_finaux: cursor.execute("INSERT INTO Paiements_Ticket (commande_id, methode, montant, date_paiement, utilisateur_id) VALUES (?, ?, ?, ?, ?)", (ticket_id_int, p_f["methode"], p_f["montant"], p_f["date"], st.session_state.utilisateur["id"]))
                                 
                                 conn.commit()
                                 st.session_state.paiements_credit = []
@@ -3221,9 +3691,6 @@ elif menu == "Prise de Commande":
                 params = pd.read_sql_query("SELECT * FROM Parametres_Restaurant WHERE id=1", conn).iloc[0]
                 p_nom_r = params["nom"] if params["nom"] else "VOTRE COMMERCE"
 
-                # ====================================================
-                # 1. GÉNÉRATION DU TICKET THERMIQUE (42 caractères max)
-                # ====================================================
                 ticket_str = f"=== {p_nom_r.upper()} ==="[:42].center(42) + "\n"
                 if params["adresse"]:
                     for ligne_adr_r in textwrap.wrap(params["adresse"], width=42): ticket_str += f"{ligne_adr_r.center(42)}\n"
@@ -3284,11 +3751,44 @@ elif menu == "Prise de Commande":
                 
                 frais_liv = float(info_cmd['frais_livraison']) if info_cmd['frais_livraison'] else 0.0
                 total_cmd = float(info_cmd['total'])
+                remise_hist = float(info_cmd['remise']) if pd.notna(info_cmd.get('remise')) else 0.0
                 
-                ticket_str += f"TOTAL HT : {fmt_prix(total_ht_hist)} {sys_monnaie}".rjust(42) + "\n"
-                ticket_str += f"TOTAL TVA : {fmt_prix(tva_totale_hist)} {sys_monnaie}".rjust(42) + "\n"
+                total_ttc_brut_hist = total_ht_hist + tva_totale_hist
+                
+                # --- NOUVEAU CALCUL DE REMISE PROPORTIONNELLE ---
+                if remise_hist > 0 and total_ttc_brut_hist > 0:
+                    ratio_remise_hist = remise_hist / total_ttc_brut_hist
+                    remise_ht_hist = total_ht_hist * ratio_remise_hist
+                    remise_tva_hist = tva_totale_hist * ratio_remise_hist
+                    
+                    total_ht_net_hist = total_ht_hist - remise_ht_hist
+                    tva_net_hist = tva_totale_hist - remise_tva_hist
+                    
+                    ticket_str += f"TOTAL HT BRUT : {fmt_prix(total_ht_hist)} {sys_monnaie}".rjust(42) + "\n"
+                    ticket_str += f"REMISE HT : - {fmt_prix(remise_ht_hist)} {sys_monnaie}".rjust(42) + "\n"
+                    ticket_str += f"TOTAL HT NET : {fmt_prix(total_ht_net_hist)} {sys_monnaie}".rjust(42) + "\n"
+                    ticket_str += f"TVA NETTE : {fmt_prix(tva_net_hist)} {sys_monnaie}".rjust(42) + "\n"
+                    
+                    html_totals = f"""
+                        <div class="totals-line"><span>Total HT Brut :</span><span>{fmt_prix(total_ht_hist)} {sys_monnaie}</span></div>
+                        <div class="totals-line"><span>Remise HT :</span><span style="color:red;">- {fmt_prix(remise_ht_hist)} {sys_monnaie}</span></div>
+                        <div class="totals-line"><span>Total HT Net :</span><span>{fmt_prix(total_ht_net_hist)} {sys_monnaie}</span></div>
+                        <div class="totals-line"><span>TVA Nette :</span><span>{fmt_prix(tva_net_hist)} {sys_monnaie}</span></div>
+                    """
+                else:
+                    ticket_str += f"TOTAL HT : {fmt_prix(total_ht_hist)} {sys_monnaie}".rjust(42) + "\n"
+                    ticket_str += f"TOTAL TVA : {fmt_prix(tva_totale_hist)} {sys_monnaie}".rjust(42) + "\n"
+                    
+                    html_totals = f"""
+                        <div class="totals-line"><span>Total HT :</span><span>{fmt_prix(total_ht_hist)} {sys_monnaie}</span></div>
+                        <div class="totals-line"><span>TVA :</span><span>{fmt_prix(tva_totale_hist)} {sys_monnaie}</span></div>
+                    """
+                # ------------------------------------------------
+                
                 if info_cmd['type_commande'] == "Livraison" and frais_liv > 0:
                     ticket_str += f"FRAIS LIVRAISON : {fmt_prix(frais_liv)} {sys_monnaie}".rjust(42) + "\n"
+                    html_totals += f'<div class="totals-line"><span>Frais de Livraison :</span><span>{fmt_prix(frais_liv)} {sys_monnaie}</span></div>'
+                    
                 ticket_str += f"NET A PAYER : {fmt_prix(total_cmd)} {sys_monnaie}".rjust(42) + "\n"
                 ticket_str += "-" * 42 + "\n"
                 
@@ -3373,9 +3873,7 @@ elif menu == "Prise de Commande":
                             </tbody>
                         </table>
                         <div class="totals">
-                            <div class="totals-line"><span>Total HT :</span><span>{fmt_prix(total_ht_hist)} {sys_monnaie}</span></div>
-                            <div class="totals-line"><span>TVA :</span><span>{fmt_prix(tva_totale_hist)} {sys_monnaie}</span></div>
-                            {f'<div class="totals-line"><span>Frais de Livraison :</span><span>{fmt_prix(frais_liv)} {sys_monnaie}</span></div>' if frais_liv > 0 else ''}
+                            {html_totals}
                             <div class="totals-line bold"><span>NET À PAYER :</span><span>{fmt_prix(total_cmd)} {sys_monnaie}</span></div>
                         </div>
                         <div style="clear: both;"></div>
@@ -3387,9 +3885,6 @@ elif menu == "Prise de Commande":
                 </html>
                 """
 
-                # ====================================================
-                # 3. AFFICHAGE DES BOUTONS DANS L'INTERFACE
-                # ====================================================
                 col_vue, col_print1, col_print2 = st.columns([1.5, 1, 1.2])
                 col_vue.code(ticket_str, language="text")
                 
