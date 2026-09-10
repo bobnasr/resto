@@ -2526,6 +2526,32 @@ elif menu == "Clients (CRM)":
                         st.error("Le montant doit être supérieur à 0.")
                     else:
                         cursor = conn.cursor()
+                        
+                        # --- SÉCURITÉ : VERIFICATION DES STOCKS ANTI-NÉGATIF ---
+                        erreurs_stock = []
+                        for p_id, item in st.session_state.panier.items():
+                            qte_nette = item["qte"] + item.get("qte_offert", 0) - item.get("qte_retour", 0)
+                            if qte_nette > 0:
+                                cursor.execute("SELECT composition_id, composition_qte FROM Produits WHERE id = ?", (p_id,))
+                                comp_res = cursor.fetchone()
+                                base_id = comp_res[0] if comp_res and comp_res[0] else p_id
+                                mult = float(comp_res[1]) if comp_res and comp_res[0] else 1.0
+                                
+                                cursor.execute("SELECT SUM(quantite) FROM Stock_Plats WHERE produit_id = ?", (base_id,))
+                                res_stock = cursor.fetchone()
+                                stock_actuel = res_stock[0] if res_stock and res_stock[0] else 0.0
+                                
+                                stock_demande = qte_nette * mult
+                                if stock_actuel < stock_demande:
+                                    stock_restant_unite = stock_actuel / mult
+                                    erreurs_stock.append(f"• **{item['nom']}** : Demandé {fmt_qte(qte_nette)}, mais stock dispo = {fmt_qte(stock_restant_unite)}")
+                                    
+                        if erreurs_stock:
+                            st.error("⛔ **Vente bloquée : Stock insuffisant pour les articles suivants :**\n\n" + "\n".join(erreurs_stock))
+                            st.stop()
+                        # -------------------------------------------------------
+                        
+                        has_a_credit = any(p["methode"] == "À Crédit" for p in st.session_state.paiements_partiels)
                         dt_now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         
                         montant_utile = montant_reglement
@@ -3087,13 +3113,13 @@ elif menu == "Prise de Commande":
                                 
                                 nom_complet = f"{fmt_qte(item['qte'])}x {item['nom']}"
                                 for ligne_nom in textwrap.wrap(nom_complet, width=42): ticket_str += f"{ligne_nom}\n"
-                                ticket_str += f"PU HT: {fmt_prix(pu_ht)} {sys_monnaie}".rjust(20) + f"PT HT: {fmt_prix(stot_ht)} {sys_monnaie}".rjust(22) + "\n"
+                                ticket_str += f"PU: {fmt_prix(item['prix_base'])}".rjust(20) + f"PT: {fmt_prix(stot_ttc)}".rjust(22) + "\n"
                                 
                             if item.get("qte_offert", 0) > 0:
                                 cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, 0.0, 0.0, 0, ?, 0)", (cmd_id, p_id, item["qte_offert"], item.get("qte_offert_envoyee", 0)))
                                 nom_complet = f"{fmt_qte(item['qte_offert'])}x {item['nom']} (Offert)"
                                 for ligne_nom in textwrap.wrap(nom_complet, width=42): ticket_str += f"{ligne_nom}\n"
-                                ticket_str += f"PU HT: 0 {sys_monnaie}".rjust(20) + f"PT HT: 0 {sys_monnaie}".rjust(22) + "\n"
+                                ticket_str += f"PU: 0".rjust(20) + f"PT: 0".rjust(22) + "\n"
                                 
                             if item.get("qte_retour", 0) > 0:
                                 stot_ttc_r = -item["prix_base"] * item["qte_retour"]
@@ -3106,7 +3132,7 @@ elif menu == "Prise de Commande":
                                 cursor.execute("INSERT INTO Lignes_Commande (commande_id, produit_id, quantite, prix_unitaire, sous_total, quantite_envoyee, quantite_offert_envoyee, quantite_retour_envoyee) VALUES (?, ?, ?, ?, ?, 0, 0, ?)", (cmd_id, p_id, -item["qte_retour"], item["prix_base"], stot_ttc_r, item.get("qte_retour_envoyee", 0)))
                                 nom_complet = f"-{fmt_qte(item['qte_retour'])}x {item['nom']} (Annul.)"
                                 for ligne_nom in textwrap.wrap(nom_complet, width=42): ticket_str += f"{ligne_nom}\n"
-                                ticket_str += f"PU HT: {fmt_prix(pu_ht_r)} {sys_monnaie}".rjust(20) + f"PT HT: {fmt_prix(stot_ht_r)} {sys_monnaie}".rjust(22) + "\n"
+                                ticket_str += f"PU: {fmt_prix(item['prix_base'])}".rjust(20) + f"PT: {fmt_prix(abs(stot_ttc_r))}".rjust(22) + "\n"
 
                             if qte_nette != 0:
                                 cursor.execute("SELECT depot_id FROM Produits WHERE id = ?", (p_id,))
@@ -3345,7 +3371,12 @@ elif menu == "Prise de Commande":
         with col_menu:
             st.markdown("#### 🍔 Menu & Produits")
             
-            df_all_prods = pd.read_sql_query("SELECT p.id, p.nom, p.prix, p.applique_tva, p.code_barre, c.tva as tva_rate FROM Produits p JOIN Categories c ON p.categorie_id = c.id WHERE p.est_vendable = 1 ORDER BY p.nom", conn)
+            df_all_prods = pd.read_sql_query("""
+                SELECT p.id, p.nom, p.prix, p.applique_tva, p.code_barre, c.tva as tva_rate,
+                COALESCE((SELECT SUM(s.quantite) FROM Stock_Plats s WHERE s.produit_id = COALESCE(p.composition_id, p.id)), 0) / COALESCE(p.composition_qte, 1) as stock_actuel
+                FROM Produits p JOIN Categories c ON p.categorie_id = c.id WHERE p.est_vendable = 1 ORDER BY p.nom
+            """, conn)
+            
             if not df_all_prods.empty:
                 dict_all_prods = {}
                 for _, row in df_all_prods.iterrows():
@@ -3397,7 +3428,8 @@ elif menu == "Prise de Commande":
                     
                     if choix_scat == "-- Toutes les sous-catégories --":
                         df_prods = pd.read_sql_query("""
-                            SELECT p.id, p.nom, p.prix, p.applique_tva, c.tva as tva_rate, sc.nom as scat_nom 
+                            SELECT p.id, p.nom, p.prix, p.applique_tva, c.tva as tva_rate, sc.nom as scat_nom,
+                            COALESCE((SELECT SUM(s.quantite) FROM Stock_Plats s WHERE s.produit_id = COALESCE(p.composition_id, p.id)), 0) / COALESCE(p.composition_qte, 1) as stock_actuel
                             FROM Produits p 
                             JOIN Categories c ON p.categorie_id = c.id 
                             LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id 
@@ -3407,7 +3439,8 @@ elif menu == "Prise de Commande":
                     else:
                         scat_id = int(df_scat[df_scat["nom"] == choix_scat].iloc[0]["id"])
                         df_prods = pd.read_sql_query("""
-                            SELECT p.id, p.nom, p.prix, p.applique_tva, c.tva as tva_rate, sc.nom as scat_nom 
+                            SELECT p.id, p.nom, p.prix, p.applique_tva, c.tva as tva_rate, sc.nom as scat_nom,
+                            COALESCE((SELECT SUM(s.quantite) FROM Stock_Plats s WHERE s.produit_id = COALESCE(p.composition_id, p.id)), 0) / COALESCE(p.composition_qte, 1) as stock_actuel
                             FROM Produits p 
                             JOIN Categories c ON p.categorie_id = c.id 
                             LEFT JOIN Sous_Categories sc ON p.sous_categorie_id = sc.id 
@@ -3423,7 +3456,10 @@ elif menu == "Prise de Commande":
                             
                             for index, row in group.reset_index().iterrows():
                                 col_idx = index % 4
-                                if cols_produits[col_idx].button(f"{row['nom']}\n{fmt_prix(row['prix'])} {sys_monnaie}", key=f"btn_prod_{row['id']}", use_container_width=True):
+                                stock_d = float(row['stock_actuel'])
+                                btn_label = f"{row['nom']}\n{fmt_prix(row['prix'])} {sys_monnaie}\n📦 {fmt_qte(stock_d)}"
+                                
+                                if cols_produits[col_idx].button(btn_label, key=f"btn_prod_{row['id']}", use_container_width=True):
                                     p_id = int(row["id"])
                                     if p_id in st.session_state.panier: 
                                         st.session_state.panier[p_id]["qte"] += 1
@@ -3433,6 +3469,7 @@ elif menu == "Prise de Commande":
                     else:
                         st.info("Aucun article dans cette sélection.")
 
+        
         with tab_historique:
             st.subheader("📜 Historique des Tickets")
             df_historique = pd.read_sql_query("""
@@ -3727,25 +3764,32 @@ elif menu == "Prise de Commande":
                         nom_complet = f"{fmt_qte(qte)}x {nom_plat} (Offert)"
                         pu_ht = 0.0
                         stot_ht = 0.0
+                        pu_ttc_aff = 0.0
+                        stot_ttc_aff = 0.0
                     elif qte < 0: 
                         nom_complet = f"{fmt_qte(qte)}x {nom_plat} (Annul.)"
                         pu_ht = abs(pu_ttc) / (1 + tva_rate / 100)
                         stot_ht = stot_ttc / (1 + tva_rate / 100)
+                        pu_ttc_aff = abs(pu_ttc)
+                        stot_ttc_aff = abs(stot_ttc)
                     else: 
                         nom_complet = f"{fmt_qte(qte)}x {nom_plat}"
                         pu_ht = pu_ttc / (1 + tva_rate / 100)
                         stot_ht = stot_ttc / (1 + tva_rate / 100)
+                        pu_ttc_aff = pu_ttc
+                        stot_ttc_aff = stot_ttc
                     
                     total_ht_hist += stot_ht
                     tva_totale_hist += (stot_ttc - stot_ht)
                     
                     for ligne_nom in textwrap.wrap(nom_complet, width=42): 
                         ticket_str += f"{ligne_nom}\n"
-                    p_u_str = f"PU HT: {fmt_prix(pu_ht)} {sys_monnaie}"
-                    s_t_str = f"PT HT: {fmt_prix(stot_ht)} {sys_monnaie}"
+                        
+                    p_u_str = f"PU: {fmt_prix(pu_ttc_aff)}"
+                    s_t_str = f"PT: {fmt_prix(stot_ttc_aff)}"
                     ticket_str += f"{p_u_str:>20}{s_t_str:>22}\n"
                     
-                    html_lignes += f"<tr><td style='border: 1px solid #ddd; padding: 8px; text-align: center;'>{fmt_qte(qte)}</td><td style='border: 1px solid #ddd; padding: 8px;'>{nom_plat}</td><td style='border: 1px solid #ddd; padding: 8px; text-align: right;'>{fmt_prix(pu_ht)} {sys_monnaie}</td><td style='border: 1px solid #ddd; padding: 8px; text-align: right;'>{fmt_prix(stot_ht)} {sys_monnaie}</td></tr>"
+                    html_lignes += f"<tr><td style='border: 1px solid #ddd; padding: 8px; text-align: center;'>{fmt_qte(qte)}</td><td style='border: 1px solid #ddd; padding: 8px;'>{nom_plat}</td><td style='border: 1px solid #ddd; padding: 8px; text-align: right;'>{fmt_prix(pu_ht)}</td><td style='border: 1px solid #ddd; padding: 8px; text-align: right;'>{fmt_prix(stot_ht)}</td></tr>"
 
                 ticket_str += "-" * 42 + "\n"
                 
