@@ -71,7 +71,22 @@ def migrer_base_de_donnees():
         cursor.execute("ALTER TABLE Ordres_Reparation ADD COLUMN taux_horaire_mo REAL DEFAULT 0.0")
     if "frais_externes" not in cols_or:
         cursor.execute("ALTER TABLE Ordres_Reparation ADD COLUMN frais_externes REAL DEFAULT 0.0")
-        
+
+   # 4. Table Maintenance Préventive
+    cursor.execute('''CREATE TABLE IF NOT EXISTS Maintenance_Preventive (
+        id_maintenance INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_vehicule INTEGER,
+        operation TEXT,
+        frequence REAL,
+        dernier_releve REAL,
+        FOREIGN KEY(id_vehicule) REFERENCES Vehicules(id_vehicule)
+    )''')
+
+    # 5. Colonne Famille d'équipement pour élargir aux machines industrielles
+    cols_v = [col[1] for col in cursor.execute("PRAGMA table_info(Vehicules)").fetchall()]
+    if "famille_equipement" not in cols_v:
+        cursor.execute("ALTER TABLE Vehicules ADD COLUMN famille_equipement TEXT DEFAULT 'Véhicule Roulant'")
+    
     conn.commit()
     conn.close()
 
@@ -364,7 +379,7 @@ else:
         "📊 Tableau de bord", 
         "🛠️ Ordres de Réparation",
         "📦 Catalogue Pièces", 
-        "🚜 Marques & Modèles", 
+        "🏭 Parc Équipements", 
         "🏢 Dépôts & Outillage"
     ]
     
@@ -399,6 +414,26 @@ else:
         with col2: st.metric("OR en atelier", nb_or)
         with col3: st.metric("Références Pièces", nb_pieces)
         with col4: st.metric("Outils enregistrés", nb_outils)
+
+    # --- ALERTES DE MAINTENANCE PRÉVENTIVE (Visibles par tous) ---
+        df_alertes = lire_donnees("""
+            SELECT v.immatriculation, m.operation, m.frequence, m.dernier_releve, v.compteur_actuel,
+                   (m.dernier_releve + m.frequence) - v.compteur_actuel AS reste
+            FROM Maintenance_Preventive m
+            JOIN Vehicules v ON m.id_vehicule = v.id_vehicule
+            WHERE reste <= (m.frequence * 0.15)
+            ORDER BY reste ASC
+        """)
+        
+        if not df_alertes.empty:
+            st.markdown("---")
+            st.error("🚨 **Alertes de Maintenance Imminente ou Dépassée**")
+            for _, r in df_alertes.iterrows():
+                prochain = r['dernier_releve'] + r['frequence']
+                if r['reste'] <= 0:
+                    st.error(f"🔴 **{r['immatriculation']}** : {r['operation']} dépassée de **{-r['reste']:,.0f} Km/H** ! (Prévue à {prochain:,.0f})")
+                else:
+                    st.warning(f"🟠 **{r['immatriculation']}** : {r['operation']} à faire dans **{r['reste']:,.0f} Km/H** (Prévue à {prochain:,.0f})")        
 
         # SECTION ANALYSE FINANCIÈRE ADMIN
         if st.session_state['niveau_acces'] >= 9:
@@ -1007,9 +1042,9 @@ else:
     # --------------------------------------------------------------------------
     # 5. MARQUES & MODÈLES (GESTION DU PARC)
     # --------------------------------------------------------------------------
-    elif choix_menu == "🚜 Marques & Modèles":
-        st.title("🚜 Gestion de la Flotte")
-        tab_vehicule, tab_marque, tab_modele = st.tabs(["1. Véhicules (Parc)", "2. Marques", "3. Modèles"])
+    elif choix_menu == "🏭 Parc Équipements":
+        st.title("🏭 Gestion du Parc & Équipements")
+        tab_vehicule, tab_marque, tab_modele, tab_preventif = st.tabs(["1. Liste des Équipements", "2. Marques", "3. Modèles / Types", "4. Plan d'Entretien"])
         
         with tab_vehicule:
             df_modeles_base = lire_donnees("SELECT mod.id_modele, m.nom_marque || ' ' || mod.nom_modele AS desc_modele FROM Modeles mod JOIN Marques m ON mod.id_marque = m.id_marque")
@@ -1017,18 +1052,31 @@ else:
             
             if not df_modeles_base.empty:
                 with st.form("form_vehicule", clear_on_submit=True):
-                    st.subheader("Entrée d'un nouveau véhicule dans la flotte")
+                    st.subheader("Enregistrer un nouvel équipement / véhicule")
+                    
+                    c_fam, c_mod = st.columns(2)
+                    with c_fam:
+                        famille = st.selectbox("Famille d'équipement *", [
+                            "Véhicule Roulant", 
+                            "Froid Industriel & Climatisation", 
+                            "Transformation & Traitement", 
+                            "Pompage & Énergie", 
+                            "Manutention",
+                            "Autre Machine"
+                        ])
+                    with c_mod:
+                        dict_mod = dict(zip(df_modeles_base['desc_modele'], df_modeles_base['id_modele']))
+                        chx_mod = st.selectbox("Marque & Modèle *", list(dict_mod.keys()))
+
                     c1, c2, c3 = st.columns(3)
                     with c1:
-                        dict_mod = dict(zip(df_modeles_base['desc_modele'], df_modeles_base['id_modele']))
-                        chx_mod = st.selectbox("Modèle d'engin *", list(dict_mod.keys()))
-                        immat = st.text_input("Immatriculation *")
+                        immat = st.text_input("Immat. / Code Machine (ex: DK01, FRIGO-01) *")
                     with c2:
-                        chassis = st.text_input("Numéro de Châssis")
-                        date_entree_p = st.date_input("Date entrée dans le parc *", value=datetime.today())
+                        chassis = st.text_input("Châssis / N° de Série")
+                        date_entree_p = st.date_input("Date d'installation / achat *", value=datetime.today())
                     with c3:
-                        compteur_init = st.number_input("Compteur initial d'entrée (Km/H) *", min_value=0.0, step=1.0)
-                        st.caption("Ce relevé d'origine restera figé comme référence historique.")
+                        compteur_init = st.number_input("Compteur initial (Km ou Heures) *", min_value=0.0, step=1.0)
+                        st.caption("Heures de marche pour une machine.")
                         
                     if st.form_submit_button("➕ Ajouter au parc", type="primary"):
                         if immat.strip():
@@ -1036,15 +1084,15 @@ else:
                                 executer_requete("""
                                     INSERT INTO Vehicules (
                                         id_modele, immatriculation, numero_chassis, 
-                                        date_entree_parc, compteur_initial, compteur_actuel, statut
-                                    ) VALUES (?, ?, ?, ?, ?, ?, 'Opérationnel')
-                                """, (dict_mod[chx_mod], immat.strip().upper(), chassis.strip(), date_entree_p.strftime("%Y-%m-%d"), compteur_init, compteur_init))
-                                st.success(f"Véhicule {immat.upper()} enregistré avec succès !")
+                                        date_entree_parc, compteur_initial, compteur_actuel, statut, famille_equipement
+                                    ) VALUES (?, ?, ?, ?, ?, ?, 'Opérationnel', ?)
+                                """, (dict_mod[chx_mod], immat.strip().upper(), chassis.strip(), date_entree_p.strftime("%Y-%m-%d"), compteur_init, compteur_init, famille))
+                                st.success(f"Équipement {immat.upper()} enregistré avec succès !")
                                 st.rerun()
                             except sqlite3.IntegrityError:
-                                st.error("⚠️ Cette immatriculation existe déjà dans le parc.")
+                                st.error("⚠️ Ce code d'équipement existe déjà dans le parc.")
                         else:
-                            st.error("L'immatriculation est obligatoire.")
+                            st.error("L'immatriculation / Code machine est obligatoire.")
 
                 st.markdown("---")
                 st.subheader("📋 État de la flotte")
@@ -1137,7 +1185,79 @@ else:
                             executer_requete("INSERT INTO Modeles (id_marque, nom_modele, type_vehicule) VALUES (?, ?, ?)", (d_m[cx_m], nm_mod, tp))
                             st.success("Modèle ajouté !")
                 st.dataframe(lire_donnees("SELECT m.nom_marque, mod.nom_modele, mod.type_vehicule FROM Modeles mod JOIN Marques m ON mod.id_marque = m.id_marque"), use_container_width=True, hide_index=True)
+                
+        with tab_preventif:
+            st.subheader("📅 Plans de Maintenance Préventive")
+            df_v = lire_donnees("SELECT id_vehicule, immatriculation || ' (' || compteur_actuel || ' Km/H)' AS desc, compteur_actuel FROM Vehicules")
+            if not df_v.empty:
+                with st.form("form_prev", clear_on_submit=True):
+                    dict_v = dict(zip(df_v['desc'], df_v['id_vehicule']))
+                    
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        chx_v = st.selectbox("Véhicule concerné *", list(dict_v.keys()))
+                        op = st.text_input("Opération (ex: Vidange Moteur, Courroie...) *")
+                    with c2:
+                        freq = st.number_input("Fréquence (Km/H) *", min_value=1.0, value=250.0, step=50.0)
+                    with c3:
+                        dernier = st.number_input("Dernier relevé (Km/H)", min_value=0.0, value=0.0, step=10.0)
+                        st.caption("Si jamais fait, mettez le compteur actuel.")
+                        
+                    if st.form_submit_button("➕ Ajouter la règle", type="primary"):
+                        if op.strip():
+                            executer_requete("INSERT INTO Maintenance_Preventive (id_vehicule, operation, frequence, dernier_releve) VALUES (?, ?, ?, ?)", (dict_v[chx_v], op.strip(), freq, dernier))
+                            st.success("Règle de maintenance ajoutée !")
+                            st.rerun()
 
+                st.markdown("---")
+                st.subheader("🔔 État des Échéances de Maintenance")
+                df_etat = lire_donnees("""
+                    SELECT m.id_maintenance, v.immatriculation, m.operation, m.frequence, m.dernier_releve, v.compteur_actuel
+                    FROM Maintenance_Preventive m
+                    JOIN Vehicules v ON m.id_vehicule = v.id_vehicule
+                    ORDER BY v.immatriculation
+                """)
+                
+                if not df_etat.empty:
+                    df_etat['Prochain'] = df_etat['dernier_releve'] + df_etat['frequence']
+                    df_etat['Reste'] = df_etat['Prochain'] - df_etat['compteur_actuel']
+                    
+                    def statut_alerte(reste, freq):
+                        if reste <= 0: return "🔴 DÉPASSÉ"
+                        elif reste <= freq * 0.15: return "🟠 IMMINENT"
+                        else: return "🟢 OK"
+                        
+                    df_etat['Statut'] = df_etat.apply(lambda r: statut_alerte(r['Reste'], r['frequence']), axis=1)
+                    
+                    df_aff = pd.DataFrame({
+                        'Véhicule': df_etat['immatriculation'],
+                        'Opération': df_etat['operation'],
+                        'Fréq.': df_etat['frequence'].apply(lambda x: f"{x:,.0f}"),
+                        'Dernier Fait': df_etat['dernier_releve'].apply(lambda x: f"{x:,.0f}"),
+                        'Actuel': df_etat['compteur_actuel'].apply(lambda x: f"{x:,.0f}"),
+                        'Prochain': df_etat['Prochain'].apply(lambda x: f"{x:,.0f}"),
+                        'Reste': df_etat['Reste'].apply(lambda x: f"{x:,.0f}"),
+                        'Statut': df_etat['Statut']
+                    })
+                    st.dataframe(df_aff, use_container_width=True, hide_index=True)
+                    
+                    with st.expander("✅ Remettre à zéro (Déclarer une maintenance comme réalisée)"):
+                        df_etat['desc_op'] = df_etat['immatriculation'] + " - " + df_etat['operation'] + " (" + df_etat['Statut'] + ")"
+                        dict_op = dict(zip(df_etat['desc_op'], zip(df_etat['id_maintenance'], df_etat['compteur_actuel'])))
+                        op_faite = st.selectbox("Sélectionnez l'opération réalisée :", list(dict_op.keys()))
+                        id_m_faite, cpt_act = dict_op[op_faite]
+                        
+                        nouveau_releve = st.number_input("Compteur au moment de l'entretien (Km/H)", value=float(cpt_act), step=1.0)
+                        col_b1, col_b2 = st.columns(2)
+                        with col_b1:
+                            if st.button("💾 Valider le nouvel entretien"):
+                                executer_requete("UPDATE Maintenance_Preventive SET dernier_releve = ? WHERE id_maintenance = ?", (nouveau_releve, id_m_faite))
+                                st.rerun()
+                        with col_b2:
+                            if st.button("🚨 Supprimer cette règle"):
+                                executer_requete("DELETE FROM Maintenance_Preventive WHERE id_maintenance = ?", (id_m_faite,))
+                                st.rerun()
+        
     # --------------------------------------------------------------------------
     # 6. DÉPÔTS & OUTILLAGE
     # --------------------------------------------------------------------------
