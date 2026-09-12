@@ -1,4 +1,4 @@
-streamlit
+streamlit-cookies-controller
+fpdf
 pandas
-fpdf2
 openpyxl
