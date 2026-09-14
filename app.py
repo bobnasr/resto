@@ -3,6 +3,7 @@ import sqlite3
 import hashlib
 import pandas as pd
 from datetime import datetime
+import time
 import random
 import os
 from fpdf import FPDF
@@ -63,6 +64,40 @@ def migrer_base_de_donnees():
     )''')
     cursor.execute("INSERT OR IGNORE INTO Ateliers (nom_atelier) VALUES ('Atelier Principal'), ('Atelier Mécanique'), ('Atelier Électricité'), ('Atelier Carrosserie'), ('Sur site')")
     
+    # === COLLEZ LES LIGNES DU MODULE OUTILLAGE ICI ===
+    cursor.execute('''CREATE TABLE IF NOT EXISTS Outillage (
+        id_outil INTEGER PRIMARY KEY AUTOINCREMENT,
+        reference_outil TEXT UNIQUE NOT NULL,
+        designation TEXT NOT NULL,
+        id_depot_actuel INTEGER,
+        atelier_affectation TEXT,
+        statut TEXT DEFAULT 'En stock',
+        date_acquisition TEXT,
+        FOREIGN KEY(id_depot_actuel) REFERENCES Depots(id_depot)
+    )''')
+    cols_out = [col[1] for col in cursor.execute("PRAGMA table_info(Outillage)").fetchall()]
+    if "fournisseur_origine" not in cols_out:
+        cursor.execute("ALTER TABLE Outillage ADD COLUMN fournisseur_origine TEXT")
+    if "facture_origine" not in cols_out:
+        cursor.execute("ALTER TABLE Outillage ADD COLUMN facture_origine TEXT")
+
+    cursor.execute('''CREATE TABLE IF NOT EXISTS Historique_Outillage (
+        id_mouvement INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_outil INTEGER,
+        type_mouvement TEXT,
+        motif TEXT,
+        date_mouvement TEXT,
+        responsable TEXT,
+        FOREIGN KEY(id_outil) REFERENCES Outillage(id_outil)
+    )''')
+
+    cols_p = [col[1] for col in cursor.execute("PRAGMA table_info(Pieces_Detachees)").fetchall()]
+    if "modele_piece" not in cols_p:
+        cursor.execute("ALTER TABLE Pieces_Detachees ADD COLUMN modele_piece TEXT")
+    if "reference_fournisseur" not in cols_p:
+        cursor.execute("ALTER TABLE Pieces_Detachees ADD COLUMN reference_fournisseur TEXT")
+    # ================================================
+
     cols_v = [col[1] for col in cursor.execute("PRAGMA table_info(Vehicules)").fetchall()]
     if "date_entree_parc" not in cols_v:
         cursor.execute("ALTER TABLE Vehicules ADD COLUMN date_entree_parc TEXT")
@@ -91,6 +126,27 @@ def migrer_base_de_donnees():
     cols_v = [col[1] for col in cursor.execute("PRAGMA table_info(Vehicules)").fetchall()]
     if "famille_equipement" not in cols_v:
         cursor.execute("ALTER TABLE Vehicules ADD COLUMN famille_equipement TEXT DEFAULT 'Véhicule Roulant'")
+
+    cols_al = [col[1] for col in cursor.execute("PRAGMA table_info(Achats_Lignes)").fetchall()]
+    if "type_article" not in cols_al:
+        cursor.execute("ALTER TABLE Achats_Lignes ADD COLUMN type_article TEXT DEFAULT 'PIECE'")
+    if "description_libre" not in cols_al:
+        cursor.execute("ALTER TABLE Achats_Lignes ADD COLUMN description_libre TEXT")
+
+    cursor.execute('''CREATE TABLE IF NOT EXISTS Mouvements_Stock (
+        id_mouvement INTEGER PRIMARY KEY AUTOINCREMENT,
+        id_piece INTEGER,
+        id_depot_depart INTEGER,
+        id_depot_arrivee INTEGER,
+        quantite REAL,
+        date_mouvement TEXT,
+        responsable TEXT,
+        motif TEXT,
+        FOREIGN KEY(id_piece) REFERENCES Pieces_Detachees(id_piece),
+        FOREIGN KEY(id_depot_depart) REFERENCES Depots(id_depot),
+        FOREIGN KEY(id_depot_arrivee) REFERENCES Depots(id_depot)
+    )''')
+
     
     conn.commit()
     conn.close()
@@ -506,6 +562,8 @@ if not st.session_state['logged_in']:
         with col_c2:
             if st.button("🚪 Se déconnecter", use_container_width=True):
                 controller.remove('gmao_user_login')
+                st.session_state.clear()
+                time.sleep(0.5)  # Laisse le temps au navigateur de détruire le cookie
                 st.rerun()
     else:
         st.subheader("Authentification sécurisée")
@@ -556,7 +614,8 @@ else:
     st.sidebar.markdown("---")
     if st.sidebar.button("🚪 Se déconnecter"):
         controller.remove('gmao_user_login')
-        st.session_state['logged_in'] = False
+        st.session_state.clear()
+        time.sleep(0.5)
         st.rerun()
 
     # --------------------------------------------------------------------------
@@ -674,10 +733,24 @@ else:
                             st.success("Pièce pré-réservée.")
                 
                 df_panier = lire_donnees("SELECT l.id_ligne_or, p.designation AS Pièce, l.quantite_utilisee AS Qté, d.nom_depot AS Magasin FROM Lignes_OR_Pieces l JOIN Pieces_Detachees p ON l.id_piece = p.id_piece JOIN Depots d ON l.id_depot = d.id_depot WHERE l.id_or = ?", (id_di_actuel,))
+                
                 if not df_panier.empty:
                     st.dataframe(df_panier[['Pièce', 'Qté', 'Magasin']], use_container_width=True, hide_index=True)
+                    
+                    with st.expander("🗑️ Retirer une pièce du panier"):
+                        df_panier['desc_ligne'] = df_panier['Pièce'] + " (" + df_panier['Qté'].astype(str) + "x - " + df_panier['Magasin'] + ")"
+                        dict_lignes_or = dict(zip(df_panier['desc_ligne'], df_panier['id_ligne_or']))
+                        
+                        ligne_a_supprimer = st.selectbox("Sélectionnez la pièce à retirer :", list(dict_lignes_or.keys()))
+                        
+                        if st.button("🚨 Retirer cette pièce"):
+                            id_ligne_del = int(dict_lignes_or[ligne_a_supprimer])
+                            executer_requete("DELETE FROM Lignes_OR_Pieces WHERE id_ligne_or = ?", (id_ligne_del,))
+                            st.success("Pièce retirée !")
+                            st.rerun()
                 
                 st.markdown("---")
+                
                 with st.form("form_validation"):
                     jours_estimes = st.number_input("Temps d'immobilisation estimé (en Jours) *", min_value=0.0, step=0.5)
                     if st.form_submit_button("🚀 VALIDER L'OR ET DÉMARRER LES TRAVAUX", type="primary"):
@@ -834,59 +907,193 @@ else:
                         mime="application/pdf",
                         type="primary"
                     )
+            st.markdown("---")
+            with st.expander("✏️ Modifier / 🗑️ Supprimer une Intervention (DI / OR)"):
+                if not df_filtre.empty:
+                    # On réutilise le dictionnaire dict_print déjà créé pour l'impression
+                    choix_edit_or = st.selectbox("Sélectionnez l'intervention à modifier ou supprimer :", list(dict_print.keys()), key="edit_or_sel")
+                    id_or_edit = dict_print[choix_edit_or]
+                    
+                    curr_or = lire_donnees("SELECT * FROM Ordres_Reparation WHERE id_or=?", (id_or_edit,)).iloc[0]
+                    
+                    with st.form(f"form_edit_or_{id_or_edit}"):
+                        c_or1, c_or2 = st.columns(2)
+                        with c_or1:
+                            type_inter_list = ["Réparation", "Contrôle et test", "Entretien périodique", "Dépannage"]
+                            idx_tp = type_inter_list.index(curr_or['type_intervention']) if curr_or['type_intervention'] in type_inter_list else 0
+                            new_type = st.selectbox("Type d'intervention", type_inter_list, index=idx_tp)
+                            
+                            df_at = lire_donnees("SELECT nom_atelier FROM Ateliers")
+                            liste_at = df_at['nom_atelier'].tolist() if not df_at.empty else ["Atelier Principal"]
+                            idx_at = liste_at.index(curr_or['atelier']) if curr_or['atelier'] in liste_at else 0
+                            new_atelier = st.selectbox("Atelier", liste_at, index=idx_at)
+                            
+                        with c_or2:
+                            statut_list = ["Demande", "En cours", "Terminé", "Annulé"]
+                            idx_st = statut_list.index(curr_or['statut']) if curr_or['statut'] in statut_list else 0
+                            new_statut = st.selectbox("Statut actuel", statut_list, index=idx_st)
+                            
+                            new_jours = st.number_input("Jours d'immobilisation estimés", min_value=0.0, value=float(curr_or['jours_estimes'] or 0.0), step=0.5)
+                            
+                        cb1, cb2 = st.columns(2)
+                        with cb1:
+                            if st.form_submit_button("💾 Mettre à jour l'intervention", type="primary"):
+                                executer_requete(
+                                    "UPDATE Ordres_Reparation SET type_intervention=?, atelier=?, statut=?, jours_estimes=? WHERE id_or=?",
+                                    (new_type, new_atelier, new_statut, new_jours, id_or_edit)
+                                )
+                                st.success("Intervention mise à jour avec succès !")
+                                st.rerun()
+                                
+                        with cb2:
+                            if st.form_submit_button("🚨 Supprimer cette intervention"):
+                                conn = sqlite3.connect("garage_agricole.db")
+                                cursor = conn.cursor()
+                                cursor.execute("PRAGMA foreign_keys = ON;")
+                                
+                                # Sécurité : Restauration des stocks si l'OR avait consommé des pièces
+                                if curr_or['statut'] in ['En cours', 'Terminé']:
+                                    lignes_conso = cursor.execute("SELECT id_piece, id_depot, quantite_utilisee FROM Lignes_OR_Pieces WHERE id_or=?", (id_or_edit,)).fetchall()
+                                    for ligne in lignes_conso:
+                                        id_p_res, id_d_res, qte_res = ligne[0], ligne[1], ligne[2]
+                                        cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible + ? WHERE id_piece=? AND id_depot=?", (qte_res, id_p_res, id_d_res))
+                                        
+                                # Nettoyage en cascade
+                                cursor.execute("DELETE FROM Lignes_OR_Pieces WHERE id_or=?", (id_or_edit,))
+                                cursor.execute("DELETE FROM Ordres_Reparation WHERE id_or=?", (id_or_edit,))
+                                
+                                conn.commit()
+                                conn.close()
+                                
+                                st.success("Intervention supprimée. Les pièces éventuellement engagées ont été remises en stock !")
+                                st.rerun()
+                else:
+                    st.info("Aucune intervention à modifier.")
+                    
 
         with tab_suivi:
             st.subheader("Suivi des Travaux & Clôture")
+            
+            # 1. Requête basée sur ta structure exacte (Jointure avec Vehicules)
             df_or_encours = lire_donnees("""
-                SELECT id_or, 
-                       IFNULL(numero_or_final, numero_or) || ' - ' || v.immatriculation AS desc_or 
-                FROM Ordres_Reparation o 
-                JOIN Vehicules v ON o.id_vehicule = v.id_vehicule 
+                SELECT o.id_or, 
+                       IFNULL(o.numero_or_final, o.numero_or) || ' - ' || v.immatriculation AS desc_or
+                FROM Ordres_Reparation o
+                JOIN Vehicules v ON o.id_vehicule = v.id_vehicule
                 WHERE o.statut = 'En cours'
             """)
-            
+
             if not df_or_encours.empty:
-                dict_encours = dict(zip(df_or_encours['desc_or'], df_or_encours['id_or']))
-                choix_or_cloture = st.selectbox("Sélectionnez l'OR en cours :", list(dict_encours.keys()), key="sel_or_suivi")
-                id_or_cloture = dict_encours[choix_or_cloture]
-                
-                with st.form("form_cloture", clear_on_submit=True):
-                    st.markdown(f"**Validation & Clôture définitive de {choix_or_cloture}**")
-                    taux_defaut = float(st.session_state['config'].get("taux_horaire_defaut", 5000))
-                    
-                    c_mo1, c_mo2, c_mo3 = st.columns(3)
-                    with c_mo1: heures_passees = st.number_input("Heures Main-d'œuvre réelles (h) *", min_value=0.0, value=1.0, step=0.5)
-                    with c_mo2: taux_horaire = st.number_input("Taux horaire appliqué", min_value=0.0, value=taux_defaut, step=500.0)
-                    with c_mo3: frais_ext = st.number_input("Sous-traitance / Frais", min_value=0.0, value=0.0, step=1000.0)
+                dict_or_cloture = dict(zip(df_or_encours['desc_or'], df_or_encours['id_or']))
+                or_a_cloturer = st.selectbox("Sélectionnez l'OR en cours :", list(dict_or_cloture.keys()))
+                id_or_clot = dict_or_cloture[or_a_cloturer]
+
+                st.markdown("---")
+
+                # 2. Ajout du module de Retour de Pièces
+                st.markdown("### 🔄 Retour de pièces au magasin (Optionnel)")
+                st.write("Si des pièces ont été pré-réservées mais non consommées, remettez-les en stock avant de clôturer.")
+
+                df_pieces_or = lire_donnees("""
+                    SELECT l.id_ligne_or, p.designation, l.quantite_utilisee, d.nom_depot, l.id_piece, l.id_depot 
+                    FROM Lignes_OR_Pieces l 
+                    JOIN Pieces_Detachees p ON l.id_piece = p.id_piece 
+                    JOIN Depots d ON l.id_depot = d.id_depot 
+                    WHERE l.id_or = ?
+                """, (id_or_clot,))
+
+                if not df_pieces_or.empty:
+                    st.dataframe(df_pieces_or[['designation', 'quantite_utilisee', 'nom_depot']].rename(columns={'designation': 'Pièce', 'quantite_utilisee': 'Qté Réservée', 'nom_depot': 'Magasin'}), use_container_width=True, hide_index=True)
+
+                    with st.expander("🔙 Enregistrer un retour partiel ou total"):
+                        df_pieces_or['desc_retour'] = df_pieces_or['designation'] + " (Max: " + df_pieces_or['quantite_utilisee'].astype(str) + ")"
+                        dict_retour = dict(zip(df_pieces_or['desc_retour'], df_pieces_or['id_ligne_or']))
+
+                        piece_retour = st.selectbox("Pièce à retourner :", list(dict_retour.keys()))
+                        id_ligne_ret = dict_retour[piece_retour]
                         
+                        max_qte = float(df_pieces_or[df_pieces_or['id_ligne_or'] == id_ligne_ret]['quantite_utilisee'].iloc[0])
+
+                        qte_retour = st.number_input("Quantité à remettre en stock", min_value=0.1, max_value=max_qte, value=max_qte, step=1.0)
+
+                        if st.button("Valider le retour en stock"):
+                            conn = sqlite3.connect("garage_agricole.db")
+                            cursor = conn.cursor()
+                            cursor.execute("PRAGMA foreign_keys = ON;")
+
+                            ligne_info = df_pieces_or[df_pieces_or['id_ligne_or'] == id_ligne_ret].iloc[0]
+                            id_p_ret, id_d_ret = int(ligne_info['id_piece']), int(ligne_info['id_depot'])
+
+                            nouvelle_qte = max_qte - qte_retour
+                            if nouvelle_qte > 0:
+                                cursor.execute("UPDATE Lignes_OR_Pieces SET quantite_utilisee=? WHERE id_ligne_or=?", (nouvelle_qte, id_ligne_ret))
+                            else:
+                                cursor.execute("DELETE FROM Lignes_OR_Pieces WHERE id_ligne_or=?", (id_ligne_ret,))
+
+                            cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible + ? WHERE id_piece=? AND id_depot=?", (qte_retour, id_p_ret, id_d_ret))
+                            
+                            conn.commit()
+                            conn.close()
+                            st.success("✅ Pièce retournée en stock avec succès !")
+                            st.rerun()
+                else:
+                    st.info("Aucune pièce détachée n'a été consommée pour cette intervention.")
+
+                st.markdown("---")
+
+                # 3. Ton formulaire de clôture existant
+                st.markdown(f"**Validation & Clôture définitive de {or_a_cloturer}**")
+                with st.form("form_cloture"):
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        heures_mo = st.number_input("Heures Main-d'œuvre réelles (h) *", min_value=0.0, value=1.0, step=0.5)
+                    with c2:
+                        taux_horaire = st.number_input("Taux horaire appliqué", min_value=0.0, value=1500.0, step=100.0)
+                    with c3:
+                        frais = st.number_input("Sous-traitance / Frais", min_value=0.0, value=0.0, step=1000.0)
+                    
                     rapport = st.text_area("Rapport de clôture (Travaux réalisés...) *")
                     
                     if st.form_submit_button("✅ Clôturer et enregistrer (Basculement vers 'retour atelier')", type="primary"):
                         if rapport.strip():
-                            datetime_cloture = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            conn = sqlite3.connect("garage_agricole.db")
-                            cursor = conn.cursor()
-                            cursor.execute("""
-                                UPDATE Ordres_Reparation 
-                                SET statut='Terminé', date_cloture=?, rapport_cloture=?, 
-                                    heures_mo=?, taux_horaire_mo=?, frais_externes=? 
-                                WHERE id_or=?
-                            """, (datetime_cloture, rapport, heures_passees, taux_horaire, frais_ext, id_or_cloture))
+                            date_cloture = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             
-                            id_v_close = cursor.execute("SELECT id_vehicule FROM Ordres_Reparation WHERE id_or=?", (id_or_cloture,)).fetchone()[0]
-                            cursor.execute("UPDATE Vehicules SET statut='Opérationnel' WHERE id_vehicule=?", (id_v_close,))
-                            conn.commit(); conn.close()
-                            st.success(f"OR clôturé avec succès ! Le PDF a été archivé dans le dossier 'retour atelier'.")
-                            st.rerun()
+                            try:
+                                # Utilisation de tes colonnes exactes
+                                executer_requete("""
+                                    UPDATE Ordres_Reparation 
+                                    SET statut='Terminé', date_cloture=?, heures_mo=?, taux_horaire_mo=?, frais_externes=?, rapport_cloture=?
+                                    WHERE id_or=?
+                                """, (date_cloture, heures_mo, taux_horaire, frais, rapport, id_or_clot))
+                                st.success("✅ OR clôturé avec succès !")
+                                st.rerun()
+                            except Exception as e:
+                                # Sécurité : enregistre au moins les montants si la colonne rapport_cloture n'existe pas encore
+                                executer_requete("""
+                                    UPDATE Ordres_Reparation 
+                                    SET statut='Terminé', date_cloture=?, heures_mo=?, taux_horaire_mo=?, frais_externes=?
+                                    WHERE id_or=?
+                                """, (date_cloture, heures_mo, taux_horaire, frais, id_or_clot))
+                                st.success("✅ OR clôturé avec succès !")
+                                st.warning("💡 Pense à ajouter 'rapport_cloture TEXT' dans ta fonction de migration pour sauvegarder les textes !")
+                                st.rerun()
                         else:
                             st.error("Le rapport de clôture est obligatoire.")
+            else:
+                st.info("Aucun Ordre de Réparation n'est actuellement en cours.")
 
     # --------------------------------------------------------------------------
     # 3. ACHATS & FOURNISSEURS
     # --------------------------------------------------------------------------
     elif choix_menu == "🛒 Achats & Fournisseurs":
         st.title("🛒 Achats & Approvisionnement")
-        tab_fournisseur, tab_achat, tab_stock, tab_alertes = st.tabs(["1. Fournisseurs", "2. Saisir & Historique Réceptions", "3. État des Stocks", "4. Alertes & Commandes"])
+        tab_fournisseur, tab_achat, tab_stock, tab_alertes, tab_transfert = st.tabs([
+            "1. Fournisseurs", 
+            "2. Saisir & Historique Réceptions", 
+            "3. État des Stocks", 
+            "4. Alertes & Commandes", 
+            "5. Transfert entre Dépôts"
+        ])
         
         with tab_fournisseur:
             with st.form("form_fournisseur", clear_on_submit=True):
@@ -923,13 +1130,13 @@ else:
                             except: st.error("Impossible : fournisseur lié à des achats.")
 
         with tab_achat:
-            st.subheader("Saisir une facture multi-articles et créditer le stock")
+            st.subheader("Saisir une facture (Pièces ou Outillage) et alimenter les comptes fournisseurs")
             
             df_fourn_base = lire_donnees("SELECT id_fournisseur, nom_fournisseur FROM Fournisseurs")
-            df_pieces_base = lire_donnees("SELECT id_piece, reference_interne || ' - ' || designation AS desc_piece FROM Pieces_Detachees")
+            df_pieces_base = lire_donnees("SELECT id_piece, reference_interne || ' - ' || designation || ' (Mod: ' || IFNULL(modele_piece, '-') || ' | Fourn: ' || IFNULL(reference_fournisseur, '-') || ')' AS desc_piece FROM Pieces_Detachees")
             df_depots_base = lire_donnees("SELECT id_depot, nom_depot FROM Depots")
             
-            if not df_fourn_base.empty and not df_pieces_base.empty and not df_depots_base.empty:
+            if not df_fourn_base.empty and not df_depots_base.empty:
                 if 'panier_achats' not in st.session_state:
                     st.session_state['panier_achats'] = []
                 
@@ -944,13 +1151,46 @@ else:
                 st.markdown("---")
                 st.markdown("##### ➕ Ajouter un article au panier de cette facture")
                 
+                type_achat_art = st.radio("Type d'article acheté :", ["Pièce Détachée (Stock)", "Outil (Parc Outillage)"], horizontal=True)
+                
+                choix_mode_outil = "Outil déjà référencé"
+                if type_achat_art == "Outil (Parc Outillage)":
+                    choix_mode_outil = st.radio("Mode d'achat outillage :", ["Outil déjà référencé", "Nouvel outil (Création)"], horizontal=True)
+                
                 with st.form("form_ajout_panier_achat", clear_on_submit=True):
                     cp1, cp2 = st.columns(2)
                     with cp1:
-                        dict_pieces = dict(zip(df_pieces_base['desc_piece'], df_pieces_base['id_piece']))
-                        choix_piece = st.selectbox("Article réceptionné :", list(dict_pieces.keys()))
+                        if type_achat_art == "Pièce Détachée (Stock)":
+                            if not df_pieces_base.empty:
+                                dict_pieces = dict(zip(df_pieces_base['desc_piece'], df_pieces_base['id_piece']))
+                                choix_article = st.selectbox("Pièce / Article (Catalogue Pièces) :", list(dict_pieces.keys()))
+                                id_art_sel = dict_pieces[choix_article]
+                            else:
+                                st.warning("Aucune pièce dans le catalogue.")
+                                id_art_sel = None
+                        else:
+                            df_outils_existants = lire_donnees("SELECT DISTINCT reference_outil, designation FROM Outillage")
+                            
+                            if choix_mode_outil == "Outil déjà référencé" and not df_outils_existants.empty:
+                                import re
+                                def extraire_base(ref):
+                                    return re.sub(r'(-\d{6,10}-\d+)+$', '', str(ref))
+                                
+                                df_outils_existants['ref_base'] = df_outils_existants['reference_outil'].apply(extraire_base)
+                                df_bases = df_outils_existants[['ref_base', 'designation']].drop_duplicates()
+                                
+                                dict_outils_ex = dict(zip(df_bases['ref_base'] + " - " + df_bases['designation'], df_bases['ref_base']))
+                                choix_outil_ex = st.selectbox("Sélectionnez l'outil :", list(dict_outils_ex.keys()))
+                                ref_nouvel_outil = dict_outils_ex[choix_outil_ex]
+                                desig_nouvel_outil = df_bases.loc[df_bases['ref_base'] == ref_nouvel_outil, 'designation'].values[0]
+                                st.caption(f"Désignation associée : **{desig_nouvel_outil}**")
+                            else:
+                                ref_nouvel_outil = st.text_input("Référence / Code Outil *", placeholder="EX: OUT-BOITE-01")
+                                desig_nouvel_outil = st.text_input("Désignation de l'outil *", placeholder="EX: Boîte d'outils mécanique")
+                            
                         dict_depots = dict(zip(df_depots_base['nom_depot'], df_depots_base['id_depot']))
-                        choix_depot = st.selectbox("Destination (Magasin) :", list(dict_depots.keys()))
+                        choix_depot = st.selectbox("Destination (Magasin / Dépôt) :", list(dict_depots.keys()))
+                        
                     with cp2:
                         quantite = st.number_input("Quantité", min_value=1.0, value=1.0, step=1.0)
                         prix_brut = st.number_input("Prix d'achat unitaire brut", min_value=0.0)
@@ -958,29 +1198,48 @@ else:
                         
                     if st.form_submit_button("➕ Ajouter au panier"):
                         if prix_brut >= 0:
-                            st.session_state['panier_achats'].append({
-                                'id_piece': dict_pieces[choix_piece],
-                                'libelle_piece': choix_piece,
-                                'id_depot': dict_depots[choix_depot],
-                                'nom_depot': choix_depot,
-                                'quantite': quantite,
-                                'prix_brut': prix_brut,
-                                'frais_approche': frais_approche,
-                                'prix_revient': prix_brut + frais_approche
-                            })
-                            st.success("Article ajouté au panier temporaire !")
-                            st.rerun()
+                            if type_achat_art == "Pièce Détachée (Stock)" and id_art_sel:
+                                st.session_state['panier_achats'].append({
+                                    'type': 'piece',
+                                    'id_piece': id_art_sel,
+                                    'libelle': choix_article,
+                                    'id_depot': dict_depots[choix_depot],
+                                    'nom_depot': choix_depot,
+                                    'quantite': quantite,
+                                    'prix_brut': prix_brut,
+                                    'frais_approche': frais_approche,
+                                    'prix_revient': prix_brut + frais_approche
+                                })
+                                st.success("Pièce ajoutée au panier !")
+                                st.rerun()
+                            elif type_achat_art == "Outil (Parc Outillage)":
+                                if ref_nouvel_outil.strip() and desig_nouvel_outil.strip():
+                                    st.session_state['panier_achats'].append({
+                                        'type': 'outil',
+                                        'ref_outil': ref_nouvel_outil.strip().upper(),
+                                        'desig_outil': desig_nouvel_outil.strip(),
+                                        'id_depot': dict_depots[choix_depot],
+                                        'nom_depot': choix_depot,
+                                        'quantite': quantite,
+                                        'prix_brut': prix_brut,
+                                        'frais_approche': frais_approche,
+                                        'prix_revient': prix_brut + frais_approche
+                                    })
+                                    st.success("Outil ajouté au panier d'achat !")
+                                    st.rerun()
+                                else:
+                                    st.error("La référence et la désignation de l'outil sont obligatoires.")
                         else:
                             st.error("Veuillez indiquer un prix valide.")
                 
                 if st.session_state['panier_achats']:
-                    st.markdown("##### 🛒 Panier en cours pour cette facture")
+                    st.markdown("##### 🛒 Panier en cours pour cette facture fournisseur")
                     df_panier_aff = pd.DataFrame(st.session_state['panier_achats'])
-                    st.dataframe(df_panier_aff[['libelle_piece', 'nom_depot', 'quantite', 'prix_brut', 'frais_approche', 'prix_revient']], use_container_width=True, hide_index=True)
+                    st.dataframe(df_panier_aff[['type', 'libelle' if 'libelle' in df_panier_aff.columns else 'desig_outil', 'nom_depot', 'quantite', 'prix_brut', 'prix_revient']], use_container_width=True, hide_index=True)
                     
                     col_val1, col_val2 = st.columns(2)
                     with col_val1:
-                        if st.button("🚀 VALIDER ET ENREGISTRER LA FACTURE GLOBALE", type="primary", use_container_width=True):
+                        if st.button("🚀 VALIDER LA FACTURE ET ENREGISTRER LES STOCKS / OUTILS", type="primary", use_container_width=True):
                             if ref_facture.strip():
                                 conn = sqlite3.connect("garage_agricole.db")
                                 cursor = conn.cursor()
@@ -992,36 +1251,58 @@ else:
                                 id_achat_parent = cursor.lastrowid
                                 
                                 for item in st.session_state['panier_achats']:
-                                    id_p = item['id_piece']
                                     id_d = item['id_depot']
                                     qte = item['quantite']
                                     p_brut = item['prix_brut']
                                     f_app = item['frais_approche']
                                     p_rev = item['prix_revient']
                                     
-                                    cursor.execute("""
-                                        INSERT INTO Achats_Lignes (id_achat, id_piece, id_depot_destination, quantite_achetee, prix_achat_unitaire_brut, frais_approche_unitaire, prix_revient_final) 
-                                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                                    """, (id_achat_parent, id_p, id_d, qte, p_brut, f_app, p_rev))
-                                    
-                                    row_stock = cursor.execute("SELECT quantite_disponible FROM Stock_Actuel WHERE id_piece=? AND id_depot=?", (id_p, id_d)).fetchone()
-                                    if row_stock: 
-                                        cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible + ? WHERE id_piece=? AND id_depot=?", (qte, id_p, id_d))
-                                    else: 
-                                        cursor.execute("INSERT INTO Stock_Actuel (id_piece, id_depot, quantite_disponible) VALUES (?, ?, ?)", (id_p, id_d, qte))
-                                    
-                                    ancien_pump = cursor.execute("SELECT prix_revient_moyen FROM Pieces_Detachees WHERE id_piece=?", (id_p,)).fetchone()[0]
-                                    stock_total_actuel = cursor.execute("SELECT SUM(quantite_disponible) FROM Stock_Actuel WHERE id_piece=?", (id_p,)).fetchone()[0]
-                                    ancien_stock = stock_total_actuel - qte
-                                    if stock_total_actuel > 0:
-                                        nouveau_pump = ((ancien_stock * ancien_pump) + (qte * p_rev)) / stock_total_actuel
-                                        cursor.execute("UPDATE Pieces_Detachees SET prix_revient_moyen = ? WHERE id_piece=?", (nouveau_pump, id_p))
+                                    if item['type'] == 'piece':
+                                        id_p = item['id_piece']
+                                        cursor.execute("""
+                                            INSERT INTO Achats_Lignes (id_achat, id_piece, id_depot_destination, quantite_achetee, prix_achat_unitaire_brut, frais_approche_unitaire, prix_revient_final) 
+                                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                                        """, (id_achat_parent, id_p, id_d, qte, p_brut, f_app, p_rev))
+                                        
+                                        row_stock = cursor.execute("SELECT quantite_disponible FROM Stock_Actuel WHERE id_piece=? AND id_depot=?", (id_p, id_d)).fetchone()
+                                        if row_stock: 
+                                            cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible + ? WHERE id_piece=? AND id_depot=?", (qte, id_p, id_d))
+                                        else: 
+                                            cursor.execute("INSERT INTO Stock_Actuel (id_piece, id_depot, quantite_disponible) VALUES (?, ?, ?)", (id_p, id_d, qte))
+                                        
+                                        ancien_pump = cursor.execute("SELECT prix_revient_moyen FROM Pieces_Detachees WHERE id_piece=?", (id_p,)).fetchone()[0]
+                                        stock_total_actuel = cursor.execute("SELECT SUM(quantite_disponible) FROM Stock_Actuel WHERE id_piece=?", (id_p,)).fetchone()[0]
+                                        ancien_stock = stock_total_actuel - qte
+                                        if stock_total_actuel > 0:
+                                            nouveau_pump = ((ancien_stock * ancien_pump) + (qte * p_rev)) / stock_total_actuel
+                                            cursor.execute("UPDATE Pieces_Detachees SET prix_revient_moyen = ? WHERE id_piece=?", (nouveau_pump, id_p))
+                                            
+                                    elif item['type'] == 'outil':
+                                        desc_outil = f"{item['ref_outil']} - {item['desig_outil']}"
+                                        cursor.execute("""
+                                            INSERT INTO Achats_Lignes (id_achat, id_piece, id_depot_destination, quantite_achetee, prix_achat_unitaire_brut, frais_approche_unitaire, prix_revient_final, type_article, description_libre) 
+                                            VALUES (?, NULL, ?, ?, ?, ?, ?, 'OUTIL', ?)
+                                        """, (id_achat_parent, id_d, qte, p_brut, f_app, p_rev, desc_outil))
+
+                                        base_ref = item['ref_outil']
+                                        for i in range(int(qte)):
+                                            ref_physique = f"{base_ref}-{datetime.now().strftime('%d%H%M%S')}-{i+1}"
+                                            cursor.execute("""
+                                                INSERT INTO Outillage (reference_outil, designation, id_depot_actuel, atelier_affectation, statut, date_acquisition, fournisseur_origine, facture_origine) 
+                                                VALUES (?, ?, ?, 'Stock Dépôt', 'En stock', ?, ?, ?)
+                                            """, (ref_physique, item['desig_outil'], id_d, datetime.now().strftime("%Y-%m-%d"), choix_fourn, ref_facture.strip()))
+                                            id_nouv_outil = cursor.lastrowid
+                                            
+                                            cursor.execute("""
+                                                INSERT INTO Historique_Outillage (id_outil, type_mouvement, motif, date_mouvement, responsable) 
+                                                VALUES (?, 'ACHAT_FOURNISSEUR', ?, ?, ?)
+                                            """, (id_nouv_outil, f"Facture {ref_facture.strip()}", datetime.now().strftime("%Y-%m-%d %H:%M"), st.session_state.get('nom_complet', 'Admin')))
                                         
                                 conn.commit()
                                 conn.close()
                                 
                                 st.session_state['panier_achats'] = []
-                                st.success("✅ Facture enregistrée, stocks et PUMP mis à jour avec succès !")
+                                st.success("✅ Facture validée ! Les pièces sont entrées en stock et les outils sont automatiquement enregistrés dans le module Outillage.")
                                 st.rerun()
                             else:
                                 st.error("⚠️ La référence de facture / BL est obligatoire !")
@@ -1030,51 +1311,107 @@ else:
                             st.session_state['panier_achats'] = []
                             st.rerun()
             else:
-                st.warning("Créez d'abord Fournisseur, Dépôt et Pièce.")
+                st.warning("Créez d'abord un Fournisseur et un Dépôt.")
 
             st.markdown("---")
             st.subheader("📋 Historique des Réceptions / Achats")
+            
+            # Correction de la requête de l'historique des achats
             df_historique_achats = lire_donnees("""
                 SELECT l.id_ligne_achat, e.id_achat, e.date_achat AS [Date], f.nom_fournisseur AS [Fournisseur], e.reference_facture AS [N° Facture / BL], 
-                       p.reference_interne || ' - ' || p.designation AS [Article], l.quantite_achetee AS [Qté], d.nom_depot AS [Dépôt], l.prix_revient_final AS [P. Revient]
+                       IFNULL(p.reference_interne || ' - ' || p.designation, l.description_libre) AS [Article], 
+                       l.quantite_achetee AS [Qté], d.nom_depot AS [Dépôt], l.prix_revient_final AS [P. Revient],
+                       (l.quantite_achetee * l.prix_revient_final) AS [Total Ligne]
                 FROM Achats_Lignes l
                 JOIN Achats_Entetes e ON l.id_achat = e.id_achat
                 JOIN Fournisseurs f ON e.id_fournisseur = f.id_fournisseur
-                JOIN Pieces_Detachees p ON l.id_piece = p.id_piece
+                LEFT JOIN Pieces_Detachees p ON l.id_piece = p.id_piece
                 JOIN Depots d ON l.id_depot_destination = d.id_depot
                 ORDER BY e.id_achat DESC
             """)
-            
+
             if not df_historique_achats.empty:
-                st.dataframe(df_historique_achats.drop(columns=['id_ligne_achat', 'id_achat']), use_container_width=True, hide_index=True)
+                col_fh1, col_fh2, col_fh3, col_fh4 = st.columns(4)
+                with col_fh1:
+                    liste_dates = ["Toutes"] + sorted(df_historique_achats['Date'].dropna().unique().tolist(), reverse=True)
+                    filtre_date = st.selectbox("Par Date :", liste_dates)
+                with col_fh2:
+                    liste_fourn = ["Tous"] + sorted(df_historique_achats['Fournisseur'].dropna().unique().tolist())
+                    filtre_fournisseur = st.selectbox("Par Fournisseur :", liste_fourn)
+                with col_fh3:
+                    liste_dep = ["Tous"] + sorted(df_historique_achats['Dépôt'].dropna().unique().tolist())
+                    filtre_depot = st.selectbox("Par Magasin :", liste_dep)
+                with col_fh4:
+                    liste_fact = ["Toutes"] + sorted(df_historique_achats['N° Facture / BL'].dropna().unique().tolist())
+                    filtre_facture = st.selectbox("Par N° Facture / BL :", liste_fact)
+
+                df_hist_filtre = df_historique_achats.copy()
+                if filtre_date != "Toutes":
+                    df_hist_filtre = df_hist_filtre[df_hist_filtre['Date'] == filtre_date]
+                if filtre_fournisseur != "Tous":
+                    df_hist_filtre = df_hist_filtre[df_hist_filtre['Fournisseur'] == filtre_fournisseur]
+                if filtre_depot != "Tous":
+                    df_hist_filtre = df_hist_filtre[df_hist_filtre['Dépôt'] == filtre_depot]
+                if filtre_facture != "Toutes":
+                    df_hist_filtre = df_hist_filtre[df_hist_filtre['N° Facture / BL'] == filtre_facture]
+
+                symbole = st.session_state.get('config', {}).get("symbole_monnaie", "FCFA")
+                total_global = df_hist_filtre['Total Ligne'].sum()
+                st.markdown(f"### 💰 Total de la sélection : **{formater_montant(total_global)} {symbole}**")
+
+                st.dataframe(df_hist_filtre.drop(columns=['id_ligne_achat', 'id_achat']), use_container_width=True, hide_index=True)
                 
                 col_ex_h1, col_ex_h2 = st.columns(2)
                 with col_ex_h1:
-                    st.download_button("📊 Exporter l'historique en Excel", data=convertir_en_excel(df_historique_achats.drop(columns=['id_ligne_achat', 'id_achat'])), file_name="Historique_Achats.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                    st.download_button(
+                        "📊 Exporter l'historique filtré (Excel)", 
+                        data=convertir_en_excel(df_hist_filtre.drop(columns=['id_ligne_achat', 'id_achat'])), 
+                        file_name="Historique_Achats.xlsx", 
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                        use_container_width=True
+                    )
                 with col_ex_h2:
-                    def pdf_achats_global(df):
+                    def pdf_achats_global(df, total_somme, devise):
                         pdf = FPDF(format='A4', orientation='L')
                         pdf.set_auto_page_break(auto=True, margin=10)
                         pdf.add_page()
                         pdf.set_font("Arial", 'B', 12)
                         pdf.cell(277, 8, "HISTORIQUE DES RECEPTIONS / ACHATS", ln=True, align='C')
                         pdf.ln(5)
+                        
+                        headers = ['Date', 'Fournisseur', 'Facture / BL', 'Article', 'Qté', 'Dépôt', 'P. Revient', 'Total']
+                        widths = [22, 35, 30, 70, 15, 35, 30, 40]
+                        
                         pdf.set_font("Arial", 'B', 9)
-                        for h in ['Date', 'Fournisseur', 'N° Facture / BL', 'Article', 'Qté', 'Dépôt', 'P. Revient']:
-                            pdf.cell(38, 6, str(h), border=1, align='C')
+                        for i, h in enumerate(headers):
+                            pdf.cell(widths[i], 6, str(h), border=1, align='C')
                         pdf.ln()
+                        
                         pdf.set_font("Arial", '', 8)
                         for _, r in df.iterrows():
-                            pdf.cell(38, 5, str(r['Date']), border=1)
-                            pdf.cell(38, 5, str(r['Fournisseur']), border=1)
-                            pdf.cell(38, 5, str(r['N° Facture / BL']), border=1)
-                            pdf.cell(38, 5, str(r['Article']), border=1)
-                            pdf.cell(38, 5, str(r['Qté']), border=1, align='R')
-                            pdf.cell(38, 5, str(r['Dépôt']), border=1)
-                            pdf.cell(38, 5, formater_montant(r['P. Revient']), border=1, align='R')
+                            article_txt = str(r['Article'])[:40] + "..." if len(str(r['Article'])) > 40 else str(r['Article'])
+                            pdf.cell(widths[0], 5, str(r['Date']), border=1)
+                            pdf.cell(widths[1], 5, str(r['Fournisseur'])[:18], border=1)
+                            pdf.cell(widths[2], 5, str(r['N° Facture / BL'])[:15], border=1)
+                            pdf.cell(widths[3], 5, article_txt, border=1)
+                            pdf.cell(widths[4], 5, formater_montant(r['Qté']), border=1, align='R')
+                            pdf.cell(widths[5], 5, str(r['Dépôt'])[:18], border=1)
+                            pdf.cell(widths[6], 5, formater_montant(r['P. Revient']), border=1, align='R')
+                            pdf.cell(widths[7], 5, formater_montant(r['Total Ligne']), border=1, align='R')
                             pdf.ln()
+                            
+                        pdf.ln(5)
+                        pdf.set_font("Arial", 'B', 10)
+                        pdf.cell(277, 7, f"TOTAL GLOBAL DE L'EXPORT : {formater_montant(total_somme)} {devise}", ln=True, align='R')
                         return pdf.output(dest='S').encode('latin1')
-                    st.download_button("📄 Exporter l'historique en PDF", data=pdf_achats_global(df_historique_achats), file_name="Historique_Achats.pdf", mime="application/pdf", use_container_width=True)
+                        
+                    st.download_button(
+                        "📄 Exporter l'historique filtré (PDF)", 
+                        data=pdf_achats_global(df_hist_filtre, total_global, symbole), 
+                        file_name="Historique_Achats.pdf", 
+                        mime="application/pdf", 
+                        use_container_width=True
+                    )
 
                 st.markdown("---")
                 st.subheader("🖨️ Imprimer une Facture / Bon de Réception d'Achat")
@@ -1082,6 +1419,7 @@ else:
                     SELECT DISTINCT e.id_achat, e.date_achat || ' | Fournisseur: ' || f.nom_fournisseur || ' | BL: ' || e.reference_facture AS desc_fact
                     FROM Achats_Entetes e
                     JOIN Fournisseurs f ON e.id_fournisseur = f.id_fournisseur
+                    JOIN Achats_Lignes l ON e.id_achat = l.id_achat
                     ORDER BY e.id_achat DESC
                 """)
                 if not df_entetes_fact.empty:
@@ -1098,33 +1436,36 @@ else:
 
                         entete = lire_donnees("SELECT e.date_achat, f.nom_fournisseur, f.telephone, e.reference_facture FROM Achats_Entetes e JOIN Fournisseurs f ON e.id_fournisseur = f.id_fournisseur WHERE e.id_achat=?", (id_achat,)).iloc[0]
                         lignes = lire_donnees("""
-                            SELECT p.reference_interne || ' - ' || p.designation AS article, l.quantite_achetee, l.prix_achat_unitaire_brut, l.frais_approche_unitaire, l.prix_revient_final, d.nom_depot
+                            SELECT IFNULL(p.reference_interne || ' - ' || p.designation, l.description_libre) AS article, 
+                                   l.quantite_achetee, l.prix_achat_unitaire_brut, l.frais_approche_unitaire, 
+                                   l.prix_revient_final, d.nom_depot
                             FROM Achats_Lignes l
-                            JOIN Pieces_Detachees p ON l.id_piece = p.id_piece
+                            LEFT JOIN Pieces_Detachees p ON l.id_piece = p.id_piece
                             JOIN Depots d ON l.id_depot_destination = d.id_depot
                             WHERE l.id_achat = ?
                         """, (id_achat,))
                         
-                        pdf = FPDF(format='A4', orientation='P')
+                        pdf = FPDF(format='A4', orientation='L')
                         pdf.set_auto_page_break(auto=True, margin=10)
                         pdf.add_page()
                         
                         pdf.set_font("Arial", 'B', 12)
-                        pdf.cell(190, 6, str(nom_entreprise).upper(), ln=True, align='L')
+                        pdf.cell(277, 6, str(nom_entreprise).upper(), ln=True, align='L')
                         pdf.ln(2)
 
                         pdf.set_font("Arial", 'B', 14)
-                        pdf.cell(190, 8, "BON DE RECEPTION / FACTURE ACHAT", ln=True, align='C')
+                        pdf.cell(277, 8, "BON DE RECEPTION / FACTURE ACHAT", ln=True, align='C')
                         pdf.set_font("Arial", '', 10)
-                        pdf.cell(190, 6, f"Date : {entete['date_achat']} | N° BL / Facture : {entete['reference_facture']}", ln=True, align='C')
+                        pdf.cell(277, 6, f"Date : {entete['date_achat']} | N° BL / Facture : {entete['reference_facture']}", ln=True, align='C')
                         pdf.ln(5)
                         pdf.set_font("Arial", 'B', 10)
-                        pdf.cell(190, 6, f"Fournisseur : {entete['nom_fournisseur']} (Tél : {entete['telephone'] if entete['telephone'] else '-'})", ln=True)
+                        pdf.cell(277, 6, f"Fournisseur : {entete['nom_fournisseur']} (Tél : {entete['telephone'] if entete['telephone'] else '-'})", ln=True)
                         pdf.ln(5)
                         
                         pdf.set_font("Arial", 'B', 9)
                         headers = ['Article / Désignation', 'Magasin', 'Qté', f'P. Brut ({symbole_monnaie})', f'Frais App.', f'P. Revient', f'Total ({symbole_monnaie})']
-                        widths = [55, 30, 15, 24, 22, 22, 22]
+                        widths = [100, 40, 20, 30, 25, 30, 32] 
+                        
                         for i, h in enumerate(headers):
                             pdf.cell(widths[i], 7, h, border=1, align='C')
                         pdf.ln()
@@ -1136,8 +1477,10 @@ else:
                             rev = float(r['prix_revient_final'])
                             tot_ligne = qte * rev
                             total_facture += tot_ligne
-                            pdf.cell(widths[0], 6, str(r['article']), border=1)
-                            pdf.cell(widths[1], 6, str(r['nom_depot']), border=1)
+                            article_texte = str(r['article'])[:65] 
+                            
+                            pdf.cell(widths[0], 6, article_texte, border=1)
+                            pdf.cell(widths[1], 6, str(r['nom_depot'])[:20], border=1)
                             pdf.cell(widths[2], 6, formater_montant(qte), border=1, align='R')
                             pdf.cell(widths[3], 6, formater_montant(r['prix_achat_unitaire_brut']), border=1, align='R')
                             pdf.cell(widths[4], 6, formater_montant(r['frais_approche_unitaire']), border=1, align='R')
@@ -1147,11 +1490,11 @@ else:
                             
                         pdf.ln(3)
                         pdf.set_font("Arial", 'B', 10)
-                        pdf.cell(190, 7, f"TOTAL GENERAL DE LA FACTURE : {formater_montant(total_facture)} {symbole_monnaie}", ln=True, align='R')
+                        pdf.cell(277, 7, f"TOTAL GENERAL DE LA FACTURE : {formater_montant(total_facture)} {symbole_monnaie}", ln=True, align='R')
                         pdf.ln(20)
                         pdf.set_font("Arial", 'B', 9)
-                        pdf.cell(95, 6, "Visa Service Achats", align='C')
-                        pdf.cell(95, 6, "Visa Magasin / Réception", align='C', ln=True)
+                        pdf.cell(138, 6, "Visa Service Achats", align='C')
+                        pdf.cell(138, 6, "Visa Magasin / Réception", align='C', ln=True)
                         
                         dossier_cible = "retour atelier"
                         if not os.path.exists(dossier_cible): os.makedirs(dossier_cible)
@@ -1167,48 +1510,51 @@ else:
 
                         entete = lire_donnees("SELECT e.date_achat, f.nom_fournisseur, e.reference_facture FROM Achats_Entetes e JOIN Fournisseurs f ON e.id_fournisseur = f.id_fournisseur WHERE e.id_achat=?", (id_achat,)).iloc[0]
                         lignes = lire_donnees("""
-                            SELECT p.reference_interne || ' - ' || p.designation AS article, l.quantite_achetee, d.nom_depot
+                            SELECT IFNULL(p.reference_interne || ' - ' || p.designation, l.description_libre) AS article, 
+                                   l.quantite_achetee, d.nom_depot
                             FROM Achats_Lignes l
-                            JOIN Pieces_Detachees p ON l.id_piece = p.id_piece
+                            LEFT JOIN Pieces_Detachees p ON l.id_piece = p.id_piece
                             JOIN Depots d ON l.id_depot_destination = d.id_depot
                             WHERE l.id_achat = ?
                         """, (id_achat,))
                         
-                        pdf = FPDF(format='A4', orientation='P')
+                        pdf = FPDF(format='A4', orientation='L')
                         pdf.set_auto_page_break(auto=True, margin=10)
                         pdf.add_page()
                         
                         pdf.set_font("Arial", 'B', 12)
-                        pdf.cell(190, 6, str(nom_entreprise).upper(), ln=True, align='L')
+                        pdf.cell(277, 6, str(nom_entreprise).upper(), ln=True, align='L')
                         pdf.ln(2)
 
                         pdf.set_font("Arial", 'B', 14)
-                        pdf.cell(190, 8, "BON DE RECEPTION MAGASIN (SANS PRIX)", ln=True, align='C')
+                        pdf.cell(277, 8, "BON DE RECEPTION MAGASIN (SANS PRIX)", ln=True, align='C')
                         pdf.set_font("Arial", '', 10)
-                        pdf.cell(190, 6, f"Date : {entete['date_achat']} | N° BL / Facture : {entete['reference_facture']}", ln=True, align='C')
+                        pdf.cell(277, 6, f"Date : {entete['date_achat']} | N° BL / Facture : {entete['reference_facture']}", ln=True, align='C')
                         pdf.ln(5)
                         pdf.set_font("Arial", 'B', 10)
-                        pdf.cell(190, 6, f"Fournisseur : {entete['nom_fournisseur']}", ln=True)
+                        pdf.cell(277, 6, f"Fournisseur : {entete['nom_fournisseur']}", ln=True)
                         pdf.ln(5)
                         
                         pdf.set_font("Arial", 'B', 9)
                         headers = ['Article / Désignation', 'Magasin de Destination', 'Quantité Réceptionnée']
-                        widths = [90, 50, 50]
+                        widths = [140, 70, 67] 
+                        
                         for i, h in enumerate(headers):
                             pdf.cell(widths[i], 7, h, border=1, align='C')
                         pdf.ln()
                         
                         pdf.set_font("Arial", '', 9)
                         for _, r in lignes.iterrows():
-                            pdf.cell(widths[0], 6, str(r['article']), border=1)
+                            article_texte = str(r['article'])[:85]
+                            pdf.cell(widths[0], 6, article_texte, border=1)
                             pdf.cell(widths[1], 6, str(r['nom_depot']), border=1)
                             pdf.cell(widths[2], 6, formater_montant(float(r['quantite_achetee'])), border=1, align='C')
                             pdf.ln()
                             
                         pdf.ln(25)
                         pdf.set_font("Arial", 'B', 9)
-                        pdf.cell(95, 6, "Visa Réceptionnaire / Magasinier", align='C')
-                        pdf.cell(95, 6, "Visa Contrôle Technique", align='C', ln=True)
+                        pdf.cell(138, 6, "Visa Réceptionnaire / Magasinier", align='C')
+                        pdf.cell(138, 6, "Visa Contrôle Technique", align='C', ln=True)
                         
                         dossier_cible = "retour atelier"
                         if not os.path.exists(dossier_cible): os.makedirs(dossier_cible)
@@ -1249,60 +1595,91 @@ else:
                         df_historique_achats['id_ligne_achat']
                     ))
                     achat_sel_key = st.selectbox("Sélectionnez l'achat à modifier ou supprimer :", list(dict_achats_mod.keys()))
-                    id_ligne_sel = dict_achats_mod[achat_sel_key]
+                    
+                    id_ligne_sel = int(dict_achats_mod[achat_sel_key])
                     
                     curr_ligne = lire_donnees("SELECT * FROM Achats_Lignes WHERE id_ligne_achat=?", (id_ligne_sel,)).iloc[0]
-                    curr_entete = lire_donnees("SELECT * FROM Achats_Entetes WHERE id_achat=?", (curr_ligne['id_achat'],)).iloc[0]
+                    id_achat_parent = int(curr_ligne['id_achat'])
+                    curr_entete = lire_donnees("SELECT * FROM Achats_Entetes WHERE id_achat=?", (id_achat_parent,)).iloc[0]
                     
+                    est_outil = ('type_article' in curr_ligne and curr_ligne['type_article'] == 'OUTIL') or pd.isna(curr_ligne['id_piece'])
+                    
+                    df_depots_edit = lire_donnees("SELECT id_depot, nom_depot FROM Depots")
+                    dict_dep_edit = dict(zip(df_depots_edit['nom_depot'], df_depots_edit['id_depot'])) if not df_depots_edit.empty else {}
+                    
+                    current_dep_name = list(dict_dep_edit.keys())[0]
+                    for nom_d, id_d in dict_dep_edit.items():
+                        if id_d == curr_ligne['id_depot_destination']:
+                            current_dep_name = nom_d
+                            break
+                    idx_dep_actuel = list(dict_dep_edit.keys()).index(current_dep_name) if current_dep_name in dict_dep_edit else 0
+
                     with st.form(f"form_up_achat_{id_ligne_sel}"):
                         c_m1, c_m2 = st.columns(2)
                         with c_m1:
                             new_bl = st.text_input("N° Facture / BL", value=curr_entete['reference_facture'])
                             new_qte = st.number_input("Quantité", min_value=1.0, value=float(curr_ligne['quantite_achetee']), step=1.0)
+                            new_depot_choix = st.selectbox("Magasin / Dépôt de destination", list(dict_dep_edit.keys()), index=idx_dep_actuel)
                         with c_m2:
                             new_prix_brut = st.number_input("Prix d'achat unitaire brut", min_value=0.0, value=float(curr_ligne['prix_achat_unitaire_brut']))
                             new_frais = st.number_input("Frais d'approche unitaire", min_value=0.0, value=float(curr_ligne['frais_approche_unitaire']))
                             
+                        if est_outil:
+                            st.warning("🛠️ Cet achat concerne un Outillage. La modification ou suppression ici n'impactera que la facture financière. Gérez les quantités physiques dans l'onglet 'Outillage' -> 'Inventaire Global'.")
+                            
                         col_b1, col_b2 = st.columns(2)
                         with col_b1:
-                            if st.form_submit_button("💾 Mettre à jour l'achat (Ajustement stock)", type="primary"):
+                            if st.form_submit_button("💾 Mettre à jour l'achat", type="primary"):
                                 ancienne_qte = float(curr_ligne['quantite_achetee'])
-                                id_p_up = curr_ligne['id_piece']
-                                id_d_up = curr_ligne['id_depot_destination']
+                                ancien_depot = curr_ligne['id_depot_destination']
+                                nouveau_depot = dict_dep_edit[new_depot_choix]
                                 nouveau_prix_revient = new_prix_brut + new_frais
                                 
                                 conn = sqlite3.connect("garage_agricole.db")
                                 cursor = conn.cursor()
                                 cursor.execute("PRAGMA foreign_keys = ON;")
                                 
-                                cursor.execute("UPDATE Achats_Entetes SET reference_facture=? WHERE id_achat=?", (new_bl, curr_entete['id_achat']))
+                                cursor.execute("UPDATE Achats_Entetes SET reference_facture=? WHERE id_achat=?", (new_bl, id_achat_parent))
                                 cursor.execute("""
                                     UPDATE Achats_Lignes 
-                                    SET quantite_achetee=?, prix_achat_unitaire_brut=?, frais_approche_unitaire=?, prix_revient_final=? 
+                                    SET quantite_achetee=?, id_depot_destination=?, prix_achat_unitaire_brut=?, frais_approche_unitaire=?, prix_revient_final=? 
                                     WHERE id_ligne_achat=?
-                                """, (new_qte, new_prix_brut, new_frais, nouveau_prix_revient, id_ligne_sel))
+                                """, (new_qte, nouveau_depot, new_prix_brut, new_frais, nouveau_prix_revient, id_ligne_sel))
                                 
-                                diff_qte = new_qte - ancienne_qte
-                                if diff_qte != 0:
-                                    cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible + ? WHERE id_piece=? AND id_depot=?", (diff_qte, id_p_up, id_d_up))
-                                    
+                                if not est_outil:
+                                    id_p_up = int(curr_ligne['id_piece'])
+                                    if ancien_depot == nouveau_depot:
+                                        diff_qte = new_qte - ancienne_qte
+                                        if diff_qte != 0:
+                                            cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible + ? WHERE id_piece=? AND id_depot=?", (diff_qte, id_p_up, nouveau_depot))
+                                    else:
+                                        cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible - ? WHERE id_piece=? AND id_depot=?", (ancienne_qte, id_p_up, ancien_depot))
+                                        row_nouveau = cursor.execute("SELECT quantite_disponible FROM Stock_Actuel WHERE id_piece=? AND id_depot=?", (id_p_up, nouveau_depot)).fetchone()
+                                        if row_nouveau:
+                                            cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible + ? WHERE id_piece=? AND id_depot=?", (new_qte, id_p_up, nouveau_depot))
+                                        else:
+                                            cursor.execute("INSERT INTO Stock_Actuel (id_piece, id_depot, quantite_disponible) VALUES (?, ?, ?)", (id_p_up, nouveau_depot, new_qte))
+                                            
                                 conn.commit(); conn.close()
-                                st.success("Achat et stock mis à jour avec succès !")
+                                st.success("Achat mis à jour avec succès !")
                                 st.rerun()
                                 
                         with col_b2:
-                            if st.form_submit_button("🚨 Supprimer cet achat et déduire du stock"):
+                            if st.form_submit_button("🚨 Supprimer cet achat"):
                                 conn = sqlite3.connect("garage_agricole.db")
                                 cursor = conn.cursor()
                                 cursor.execute("PRAGMA foreign_keys = ON;")
-                                id_p_del, id_d_del, qte_del = curr_ligne['id_piece'], curr_ligne['id_depot_destination'], curr_ligne['quantite_achetee']
-                                cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible - ? WHERE id_piece=? AND id_depot=?", (qte_del, id_p_del, id_d_del))
-                                id_achat_parent = curr_ligne['id_achat']
+                                
+                                if not est_outil:
+                                    id_p_del, id_d_del, qte_del = int(curr_ligne['id_piece']), int(curr_ligne['id_depot_destination']), float(curr_ligne['quantite_achetee'])
+                                    cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible - ? WHERE id_piece=? AND id_depot=?", (qte_del, id_p_del, id_d_del))
+                                
                                 cursor.execute("DELETE FROM Achats_Lignes WHERE id_ligne_achat=?", (id_ligne_sel,))
                                 if cursor.execute("SELECT COUNT(*) FROM Achats_Lignes WHERE id_achat=?", (id_achat_parent,)).fetchone()[0] == 0:
                                     cursor.execute("DELETE FROM Achats_Entetes WHERE id_achat=?", (id_achat_parent,))
+                                    
                                 conn.commit(); conn.close()
-                                st.success("Achat supprimé et stock réajusté !")
+                                st.success("Ligne d'achat supprimée avec succès !")
                                 st.rerun()
             else:
                 st.info("Aucun achat enregistré.")
@@ -1375,6 +1752,143 @@ else:
                     st.download_button("📄 Exporter le stock filtré en PDF", data=pdf_stock(df_stock), file_name="Etat_Stock.pdf", mime="application/pdf", use_container_width=True)
             else:
                 st.info("Aucun stock ne correspond aux filtres.")
+
+            st.markdown("---")
+            with st.expander("⚖️ Ajustement Manuel du Stock (Entrée / Sortie Exceptionnelle)"):
+                df_pieces_mvt = lire_donnees("SELECT id_piece, reference_interne || ' - ' || designation AS desc_p FROM Pieces_Detachees")
+                df_depots_mvt = lire_donnees("SELECT id_depot, nom_depot FROM Depots")
+                
+                if not df_pieces_mvt.empty and not df_depots_mvt.empty:
+                    with st.form("form_mvt_manuel", clear_on_submit=True):
+                        c_mvt1, c_mvt2, c_mvt3 = st.columns(3)
+                        
+                        with c_mvt1:
+                            dict_p_mvt = dict(zip(df_pieces_mvt['desc_p'], df_pieces_mvt['id_piece']))
+                            chx_p_mvt = st.selectbox("Article / Pièce :", list(dict_p_mvt.keys()))
+                            
+                            dict_d_mvt = dict(zip(df_depots_mvt['nom_depot'], df_depots_mvt['id_depot']))
+                            chx_d_mvt = st.selectbox("Magasin / Dépôt :", list(dict_d_mvt.keys()))
+                            
+                        with c_mvt2:
+                            type_mvt = st.radio("Type de mouvement :", ["➕ Entrée (Ajout manuel)", "➖ Sortie (Retrait / Casse)"])
+                            qte_mvt = st.number_input("Quantité à ajuster", min_value=0.1, value=1.0, step=1.0)
+                            
+                        with c_mvt3:
+                            motif_mvt = st.text_input("Motif détaillé *", placeholder="Ex: Erreur inventaire, Pièce cassée...")
+                            st.write("")
+                            st.write("")
+                            btn_mvt = st.form_submit_button("🚀 Valider l'ajustement", type="primary", use_container_width=True)
+                            
+                        if btn_mvt:
+                            if motif_mvt.strip():
+                                id_p = dict_p_mvt[chx_p_mvt]
+                                id_d = dict_d_mvt[chx_d_mvt]
+                                
+                                conn = sqlite3.connect("garage_agricole.db")
+                                cursor = conn.cursor()
+                                cursor.execute("PRAGMA foreign_keys = ON;")
+                                
+                                row_stk = cursor.execute("SELECT quantite_disponible FROM Stock_Actuel WHERE id_piece=? AND id_depot=?", (id_p, id_d)).fetchone()
+                                
+                                if type_mvt == "➕ Entrée (Ajout manuel)":
+                                    if row_stk:
+                                        cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible + ? WHERE id_piece=? AND id_depot=?", (qte_mvt, id_p, id_d))
+                                    else:
+                                        cursor.execute("INSERT INTO Stock_Actuel (id_piece, id_depot, quantite_disponible) VALUES (?, ?, ?)", (id_p, id_d, qte_mvt))
+                                else:
+                                    if row_stk:
+                                        cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible - ? WHERE id_piece=? AND id_depot=?", (qte_mvt, id_p, id_d))
+                                    else:
+                                        cursor.execute("INSERT INTO Stock_Actuel (id_piece, id_depot, quantite_disponible) VALUES (?, ?, ?)", (id_p, id_d, -qte_mvt))
+                                        
+                                conn.commit()
+                                conn.close()
+                                
+                                st.success(f"Ajustement réussi : {type_mvt} de {qte_mvt} unité(s) pour le motif '{motif_mvt.strip()}'.")
+                                st.rerun()
+                            else:
+                                st.error("⚠️ Le motif est obligatoire pour justifier ce mouvement.")
+                else:
+                    st.warning("⚠️ Veuillez d'abord créer des pièces et des dépôts.")
+
+            st.markdown("---")
+            with st.expander("📥 Import massif de Stock initial (via Excel)"):
+                st.write("Gagnez du temps en important votre inventaire actuel depuis un fichier Excel.")
+                
+                df_modele = pd.DataFrame({
+                    "Référence Interne": ["MOTEUR01", "FILTRE-HUILE-02"],
+                    "Magasin / Dépôt": ["MAGASIN 01", "DEPOT OUTILS"],
+                    "Quantité à ajouter": [10, 50]
+                })
+                
+                st.download_button(
+                    label="⬇️ Télécharger le modèle Excel vierge",
+                    data=convertir_en_excel(df_modele),
+                    file_name="Modele_Import_Stock.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+                
+                fichier_import = st.file_uploader("Chargez votre fichier d'inventaire complété (.xlsx)", type=["xlsx"])
+                
+                if fichier_import is not None:
+                    if st.button("🚀 Lancer l'importation du stock", type="primary"):
+                        try:
+                            df_in = pd.read_excel(fichier_import)
+                            colonnes_requises = ["Référence Interne", "Magasin / Dépôt", "Quantité à ajouter"]
+                            
+                            if not all(col in df_in.columns for col in colonnes_requises):
+                                st.error(f"⚠️ Le fichier ne respecte pas le modèle. Il manque une ou plusieurs colonnes : {', '.join(colonnes_requises)}")
+                            else:
+                                conn = sqlite3.connect("garage_agricole.db")
+                                cursor = conn.cursor()
+                                cursor.execute("PRAGMA foreign_keys = ON;")
+                                
+                                succes = 0
+                                erreurs = []
+                                
+                                for index, row in df_in.iterrows():
+                                    ref = str(row['Référence Interne']).strip()
+                                    depot = str(row['Magasin / Dépôt']).strip()
+                                    
+                                    try:
+                                        qte = float(row['Quantité à ajouter'])
+                                    except ValueError:
+                                        erreurs.append(f"Ligne {index+2} : Quantité invalide pour la référence '{ref}'.")
+                                        continue
+                                        
+                                    p_row = cursor.execute("SELECT id_piece FROM Pieces_Detachees WHERE reference_interne=?", (ref,)).fetchone()
+                                    d_row = cursor.execute("SELECT id_depot FROM Depots WHERE nom_depot=?", (depot,)).fetchone()
+                                    
+                                    if not p_row:
+                                        erreurs.append(f"Ligne {index+2} : Référence '{ref}' introuvable dans le catalogue pièces.")
+                                        continue
+                                    if not d_row:
+                                        erreurs.append(f"Ligne {index+2} : Dépôt '{depot}' introuvable dans la base.")
+                                        continue
+                                        
+                                    id_p, id_d = p_row[0], d_row[0]
+                                    
+                                    stk_row = cursor.execute("SELECT quantite_disponible FROM Stock_Actuel WHERE id_piece=? AND id_depot=?", (id_p, id_d)).fetchone()
+                                    if stk_row:
+                                        cursor.execute("UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible + ? WHERE id_piece=? AND id_depot=?", (qte, id_p, id_d))
+                                    else:
+                                        cursor.execute("INSERT INTO Stock_Actuel (id_piece, id_depot, quantite_disponible) VALUES (?, ?, ?)", (id_p, id_d, qte))
+                                        
+                                    succes += 1
+                                    
+                                conn.commit()
+                                conn.close()
+                                
+                                if succes > 0:
+                                    st.success(f"✅ Importation réussie : {succes} ligne(s) de stock ajoutée(s) avec succès !")
+                                if erreurs:
+                                    st.warning("⚠️ Certaines lignes ont été ignorées à cause d'erreurs :")
+                                    for err in erreurs:
+                                        st.write(f"- {err}")
+                                        
+                        except Exception as e:
+                            st.error(f"Erreur technique lors de la lecture du fichier : {e}")
 
         with tab_alertes:
             st.subheader("🚨 Alertes de Stock (Rouge, Orange, Vert)")
@@ -1456,6 +1970,138 @@ else:
             else:
                 st.info("Aucune donnée de stock disponible.")
 
+        with tab_transfert:
+            st.subheader("🚚 Transfert de stock entre Dépôts / Magasins")
+            
+            df_pieces_tr = lire_donnees("SELECT id_piece, reference_interne || ' - ' || designation AS desc_p FROM Pieces_Detachees")
+            df_depots_tr = lire_donnees("SELECT id_depot, nom_depot FROM Depots")
+            
+            if not df_pieces_tr.empty and len(df_depots_tr) >= 2:
+                dict_p_tr = dict(zip(df_pieces_tr['desc_p'], df_pieces_tr['id_piece']))
+                dict_d_tr = dict(zip(df_depots_tr['nom_depot'], df_depots_tr['id_depot']))
+                depot_noms = list(dict_d_tr.keys())
+                
+                # Sélection de l'article et du dépôt source en dehors du formulaire pour affichage dynamique
+                c_sel1, c_sel2 = st.columns(2)
+                with c_sel1:
+                    chx_p_tr = st.selectbox("Article à transférer :", list(dict_p_tr.keys()), key="tr_article_sel")
+                with c_sel2:
+                    depot_depart = st.selectbox("Dépôt de DÉPART (Source) :", depot_noms, key="tr_depot_dep_sel")
+                
+                # Récupération et affichage en temps réel du stock source
+                id_p_courant = dict_p_tr[chx_p_tr]
+                id_dep_dep_courant = dict_d_tr[depot_depart]
+                
+                df_stk_src = lire_donnees(
+                    "SELECT quantite_disponible FROM Stock_Actuel WHERE id_piece=? AND id_depot=?", 
+                    (id_p_courant, id_dep_dep_courant)
+                )
+                qte_dispo_actuelle = float(df_stk_src.iloc[0, 0]) if not df_stk_src.empty else 0.0
+                
+                # Affichage visuel direct du stock disponible
+                st.info(f"📦 **Stock disponible dans [{depot_depart}]** pour cet article : **{formater_valeur_qte(qte_dispo_actuelle, st.session_state['config'])}** unité(s)")
+                
+                with st.form("form_transfert_depot", clear_on_submit=True):
+                    c_tr1, c_tr2 = st.columns(2)
+                    
+                    with c_tr1:
+                        # Exclure le dépôt de départ de la liste d'arrivée
+                        depots_arrivee_possibles = [d for d in depot_noms if d != depot_depart]
+                        depot_arrivee = st.selectbox("Dépôt d'ARRIVÉE (Destination) :", depots_arrivee_possibles)
+                        
+                        max_val_qte = max(float(qte_dispo_actuelle), 1.0)
+                        qte_transfert = st.number_input("Quantité à transférer", min_value=0.1, max_value=max_val_qte, value=1.0, step=1.0)
+                        
+                    with c_tr2:
+                        motif_tr = st.text_input("Motif / Référence du bon *", placeholder="Ex: Réappro atelier mécanique...")
+                        st.write("")
+                        st.write("")
+                        btn_valider_tr = st.form_submit_button("🚀 Valider le transfert", type="primary", use_container_width=True)
+                        
+                    if btn_valider_tr:
+                        if not motif_tr.strip():
+                            st.error("⚠️ Le motif ou la référence du transfert est obligatoire.")
+                        elif qte_transfert > qte_dispo_actuelle:
+                            st.error(f"❌ Quantité demandée supérieure au stock disponible ({qte_dispo_actuelle}) !")
+                        else:
+                            id_dep_arr = dict_d_tr[depot_arrivee]
+                            
+                            conn = sqlite3.connect("garage_agricole.db")
+                            cursor = conn.cursor()
+                            cursor.execute("PRAGMA foreign_keys = ON;")
+                            
+                            # 1. Déduire du dépôt de départ
+                            cursor.execute(
+                                "UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible - ? WHERE id_piece=? AND id_depot=?",
+                                (qte_transfert, id_p_courant, id_dep_dep_courant)
+                            )
+                            
+                            # 2. Ajouter au dépôt d'arrivée (ou création de la ligne si absente)
+                            stock_dest = cursor.execute(
+                                "SELECT quantite_disponible FROM Stock_Actuel WHERE id_piece=? AND id_depot=?", 
+                                (id_p_courant, id_dep_arr)
+                            ).fetchone()
+                            
+                            if stock_dest:
+                                cursor.execute(
+                                    "UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible + ? WHERE id_piece=? AND id_depot=?",
+                                    (qte_transfert, id_p_courant, id_dep_arr)
+                                )
+                            else:
+                                cursor.execute(
+                                    "INSERT INTO Stock_Actuel (id_piece, id_depot, quantite_disponible) VALUES (?, ?, ?)",
+                                    (id_p_courant, id_dep_arr, qte_transfert)
+                                )
+                                
+                            # 3. Enregistrement dans l'historique global des mouvements
+                            cursor.execute('''CREATE TABLE IF NOT EXISTS Mouvements_Stock (
+                                id_mouvement INTEGER PRIMARY KEY AUTOINCREMENT,
+                                id_piece INTEGER,
+                                id_depot_depart INTEGER,
+                                id_depot_arrivee INTEGER,
+                                quantite REAL,
+                                date_mouvement TEXT,
+                                responsable TEXT,
+                                motif TEXT
+                            )''')
+                            
+                            cursor.execute("""
+                                INSERT INTO Mouvements_Stock (id_piece, id_depot_depart, id_depot_arrivee, quantite, date_mouvement, responsable, motif)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """, (id_p_courant, id_dep_dep_courant, id_dep_arr, qte_transfert, datetime.now().strftime("%Y-%m-%d %H:%M"), st.session_state.get('nom_complet', 'Admin'), motif_tr.strip()))
+                            
+                            conn.commit()
+                            conn.close()
+                            
+                            st.success(f"✅ Transfert de {qte_transfert} unité(s) réussi de [{depot_depart}] vers [{depot_arrivee}] !")
+                            st.rerun()
+            else:
+                st.warning("⚠️ Il faut au moins un article et 2 dépôts configurés pour effectuer un transfert.")
+
+            st.markdown("---")
+            st.subheader("📋 Historique des transferts entre dépôts")
+            df_mvt_historique = lire_donnees("""
+                SELECT m.date_mouvement AS [Date], p.reference_interne || ' - ' || p.designation AS [Article],
+                       d1.nom_depot AS [Départ], d2.nom_depot AS [Arrivée], m.quantite AS [Qté], m.motif AS [Motif], m.responsable AS [Auteur]
+                FROM Mouvements_Stock m
+                JOIN Pieces_Detachees p ON m.id_piece = p.id_piece
+                JOIN Depots d1 ON m.id_depot_depart = d1.id_depot
+                JOIN Depots d2 ON m.id_depot_arrivee = d2.id_depot
+                ORDER BY m.id_mouvement DESC
+            """)
+            
+            if not df_mvt_historique.empty:
+                st.dataframe(df_mvt_historique, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "📊 Exporter l'historique des transferts (Excel)",
+                    data=convertir_en_excel(df_mvt_historique),
+                    file_name="Historique_Transferts_Depots.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            else:
+                st.info("Aucun transfert de stock enregistré pour l'instant.")        
+
     # --------------------------------------------------------------------------
     # 4. CATALOGUE PIÈCES
     # --------------------------------------------------------------------------
@@ -1507,53 +2153,284 @@ else:
             df_cat_actuelles = lire_donnees("SELECT id_categorie, nom_categorie FROM Categories_Pieces")
             if not df_cat_actuelles.empty:
                 with st.form("form_piece_v2", clear_on_submit=True):
-                    col1, col2 = st.columns(2)
-                    with col1: ref, desig = st.text_input("Référence *"), st.text_input("Désignation *")
+                    col1, col2, col3 = st.columns(3)
+                    with col1: 
+                        ref = st.text_input("Référence Interne *")
+                        desig = st.text_input("Désignation *")
                     with col2:
+                        ref_fourn = st.text_input("Réf. Fournisseur")
+                        modele_p = st.text_input("Modèle N° / OEM")
+                    with col3:
                         dict_cat = dict(zip(df_cat_actuelles['nom_categorie'], df_cat_actuelles['id_categorie']))
                         choix_cat = st.selectbox("Catégorie *", list(dict_cat.keys()))
                         dec_q_cfg = int(st.session_state['config'].get("dec_quantite", 0))
                         seuil = st.number_input("Seuil d'alerte", min_value=0.0, format=f"%.{dec_q_cfg}f")
+                        
                     if st.form_submit_button("Créer Article"):
                         if ref and desig:
                             try:
-                                executer_requete("INSERT INTO Pieces_Detachees (reference_interne, designation, id_categorie, seuil_alerte_stock) VALUES (?, ?, ?, ?)", (ref.strip(), desig.strip(), dict_cat[choix_cat], seuil))
+                                executer_requete(
+                                    "INSERT INTO Pieces_Detachees (reference_interne, designation, id_categorie, seuil_alerte_stock, modele_piece, reference_fournisseur) VALUES (?, ?, ?, ?, ?, ?)", 
+                                    (ref.strip(), desig.strip(), dict_cat[choix_cat], seuil, modele_p.strip(), ref_fourn.strip())
+                                )
                                 st.success("Article créé avec succès !")
                                 st.rerun()
-                            except sqlite3.IntegrityError: st.error("Référence existante !")
+                            except sqlite3.IntegrityError: 
+                                st.error("Référence existante !")
                 
-                df_pieces_aff = lire_donnees("SELECT p.id_piece, p.reference_interne AS Réf, p.designation AS Désignation, c.nom_categorie AS Catégorie, p.prix_revient_moyen AS [PUMP], p.seuil_alerte_stock AS [Alerte] FROM Pieces_Detachees p JOIN Categories_Pieces c ON p.id_categorie = c.id_categorie")
-                st.dataframe(df_pieces_aff.drop(columns=['id_piece']), use_container_width=True, hide_index=True)
+                st.markdown("---")
+                # 1. Requête enrichie avec les nouveaux champs
+                df_pieces_aff = lire_donnees("""
+                    SELECT p.id_piece, 
+                           p.reference_interne AS [Réf], 
+                           p.designation AS [Désignation], 
+                           IFNULL(p.modele_piece, '-') AS [Modèle / OEM],
+                           IFNULL(p.reference_fournisseur, '-') AS [Réf. Fournisseur],
+                           c.nom_categorie AS [Catégorie], 
+                           p.prix_revient_moyen AS [PUMP], 
+                           p.seuil_alerte_stock AS [Alerte]
+                    FROM Pieces_Detachees p 
+                    JOIN Categories_Pieces c ON p.id_categorie = c.id_categorie
+                    ORDER BY p.reference_interne
+                """)
+
+                if not df_pieces_aff.empty:
+                    # 2. Ajout du filtre par catégorie
+                    liste_cat_filtre = ["Toutes"] + sorted(df_pieces_aff['Catégorie'].dropna().unique().tolist())
+                    filtre_cat = st.selectbox("Filtrer par Catégorie :", liste_cat_filtre)
+                    
+                    df_pieces_filtre = df_pieces_aff.copy()
+                    if filtre_cat != "Toutes":
+                        df_pieces_filtre = df_pieces_filtre[df_pieces_filtre['Catégorie'] == filtre_cat]
+                        
+                    # 3. Affichage du tableau filtré
+                    st.dataframe(df_pieces_filtre.drop(columns=['id_piece']), use_container_width=True, hide_index=True)
+                    
+                    # 4. Exports PDF et Excel
+                    col_exp1, col_exp2 = st.columns(2)
+                    with col_exp1:
+                        st.download_button(
+                            label="📊 Exporter le catalogue (Excel)",
+                            data=convertir_en_excel(df_pieces_filtre.drop(columns=['id_piece'])),
+                            file_name=f"Catalogue_Pieces_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                    with col_exp2:
+                        def pdf_catalogue(df):
+                            pdf = FPDF(format='A4', orientation='L')
+                            pdf.set_auto_page_break(auto=True, margin=10)
+                            pdf.add_page()
+                            pdf.set_font("Arial", 'B', 12)
+                            pdf.cell(277, 8, "CATALOGUE DES PIECES DETACHEES", ln=True, align='C')
+                            pdf.ln(5)
+                            
+                            headers = ['Réf', 'Désignation', 'Modèle / OEM', 'Réf. Fourn.', 'Catégorie', 'PUMP', 'Alerte']
+                            widths = [30, 70, 45, 40, 40, 30, 22] # Total = 277mm
+                            
+                            pdf.set_font("Arial", 'B', 9)
+                            for i, h in enumerate(headers):
+                                pdf.cell(widths[i], 6, str(h), border=1, align='C')
+                            pdf.ln()
+                            
+                            pdf.set_font("Arial", '', 8)
+                            for _, r in df.iterrows():
+                                desig_txt = str(r['Désignation'])[:40] + "..." if len(str(r['Désignation'])) > 40 else str(r['Désignation'])
+                                mod_txt = str(r['Modèle / OEM'])[:25]
+                                fourn_txt = str(r['Réf. Fournisseur'])[:20]
+                                
+                                pdf.cell(widths[0], 5, str(r['Réf']), border=1)
+                                pdf.cell(widths[1], 5, desig_txt, border=1)
+                                pdf.cell(widths[2], 5, mod_txt, border=1)
+                                pdf.cell(widths[3], 5, fourn_txt, border=1)
+                                pdf.cell(widths[4], 5, str(r['Catégorie']), border=1)
+                                pdf.cell(widths[5], 5, formater_montant(r['PUMP']), border=1, align='R')
+                                pdf.cell(widths[6], 5, formater_montant(r['Alerte']), border=1, align='C')
+                                pdf.ln()
+                            return pdf.output(dest='S').encode('latin1')
+                            
+                        st.download_button(
+                            label="📄 Exporter le catalogue (PDF)",
+                            data=pdf_catalogue(df_pieces_filtre),
+                            file_name=f"Catalogue_Pieces_{datetime.now().strftime('%Y%m%d')}.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+                else:
+                    st.info("Le catalogue de pièces est actuellement vide.")
 
                 st.markdown("---")
                 with st.expander("✏️ Modifier / 🗑️ Supprimer un Article"):
-                    df_p_edit = lire_donnees("SELECT id_piece, reference_interne || ' - ' || designation AS desc FROM Pieces_Detachees")
+                    df_p_edit = lire_donnees("SELECT id_piece, reference_interne || ' - ' || designation AS desc FROM Pieces_Detachees ORDER BY id_piece ASC")
                     if not df_p_edit.empty:
                         dict_p_edit = dict(zip(df_p_edit['desc'], df_p_edit['id_piece']))
                         piece_a_editer = st.selectbox("Sélectionnez l'article :", list(dict_p_edit.keys()), key="edit_piece_sel")
                         id_p_edit = dict_p_edit[piece_a_editer]
+                        
                         curr_p = lire_donnees("SELECT * FROM Pieces_Detachees WHERE id_piece=?", (id_p_edit,)).iloc[0]
                         
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            new_ref = st.text_input("Référence", value=curr_p['reference_interne'], key="up_p_ref")
-                            new_desig = st.text_input("Désignation", value=curr_p['designation'], key="up_p_des")
-                        with c2:
-                            new_seuil = st.number_input("Seuil d'alerte", value=float(curr_p['seuil_alerte_stock']), key="up_p_seuil")
-                        
-                        cb1, cb2 = st.columns(2)
-                        with cb1:
-                            if st.button("💾 Mettre à jour l'article", type="primary", key="btn_up_p"):
-                                executer_requete("UPDATE Pieces_Detachees SET reference_interne=?, designation=?, seuil_alerte_stock=? WHERE id_piece=?", (new_ref.strip(), new_desig.strip(), new_seuil, id_p_edit))
-                                st.success("Article mis à jour !")
-                                st.rerun()
-                        with cb2:
-                            if st.button("🚨 Supprimer l'article", key="btn_del_p"):
-                                try:
-                                    executer_requete("DELETE FROM Pieces_Detachees WHERE id_piece=?", (id_p_edit,))
-                                    st.success("Article supprimé.")
+                        # Formulaire isolé avec un identifiant unique par ID d'article
+                        with st.form(f"form_up_piece_{id_p_edit}"):
+                            # Sécurisation des champs optionnels
+                            val_modele = curr_p['modele_piece'] if 'modele_piece' in curr_p and not pd.isna(curr_p['modele_piece']) else ""
+                            val_fourn = curr_p['reference_fournisseur'] if 'reference_fournisseur' in curr_p and not pd.isna(curr_p['reference_fournisseur']) else ""
+
+                            # Préparation de la liste des catégories
+                            df_cat_edit = lire_donnees("SELECT id_categorie, nom_categorie FROM Categories_Pieces")
+                            dict_cat_edit = dict(zip(df_cat_edit['nom_categorie'], df_cat_edit['id_categorie'])) if not df_cat_edit.empty else {"Général": 1}
+                            
+                            # Recherche de la catégorie actuelle de l'article pour la présélectionner
+                            id_cat_actuelle = curr_p['id_categorie']
+                            nom_cat_actuelle = list(dict_cat_edit.keys())[0]
+                            for nom, id_cat in dict_cat_edit.items():
+                                if id_cat == id_cat_actuelle:
+                                    nom_cat_actuelle = nom
+                                    break
+                            idx_cat = list(dict_cat_edit.keys()).index(nom_cat_actuelle) if nom_cat_actuelle in dict_cat_edit else 0
+
+                            c1, c2, c3 = st.columns(3)
+                            with c1:
+                                new_ref = st.text_input("Référence", value=curr_p['reference_interne'], key=f"up_p_ref_{id_p_edit}")
+                                new_desig = st.text_input("Désignation", value=curr_p['designation'], key=f"up_p_des_{id_p_edit}")
+                            with c2:
+                                new_modele = st.text_input("Modèle N° / OEM", value=val_modele, key=f"up_p_mod_{id_p_edit}")
+                                new_fourn = st.text_input("Réf. Fournisseur", value=val_fourn, key=f"up_p_fourn_{id_p_edit}")
+                            with c3:
+                                new_seuil = st.number_input("Seuil d'alerte", value=float(curr_p['seuil_alerte_stock']), key=f"up_p_seuil_{id_p_edit}")
+                                new_cat_name = st.selectbox("Catégorie", list(dict_cat_edit.keys()), index=idx_cat, key=f"up_p_cat_{id_p_edit}")
+                            
+                            cb1, cb2 = st.columns(2)
+                            with cb1:
+                                if st.form_submit_button("💾 Mettre à jour l'article", type="primary"):
+                                    new_id_cat = dict_cat_edit[new_cat_name]
+                                    executer_requete(
+                                        "UPDATE Pieces_Detachees SET reference_interne=?, designation=?, seuil_alerte_stock=?, modele_piece=?, reference_fournisseur=?, id_categorie=? WHERE id_piece=?", 
+                                        (new_ref.strip(), new_desig.strip(), new_seuil, new_modele.strip(), new_fourn.strip(), new_id_cat, id_p_edit)
+                                    )
+                                    st.success(f"Article mis à jour avec succès !")
                                     st.rerun()
-                                except: st.error("Impossible : article lié à des mouvements ou stocks.")
+                            with cb2:
+                                if st.form_submit_button("🚨 Supprimer l'article"):
+                                    try:
+                                        conn_del = sqlite3.connect("garage_agricole.db")
+                                        cursor_del = conn_del.cursor()
+                                        cursor_del.execute("PRAGMA foreign_keys = ON;")
+                                        
+                                        cursor_del.execute("DELETE FROM Stock_Actuel WHERE id_piece=?", (id_p_edit,))
+                                        cursor_del.execute("DELETE FROM Compatibilites_Pieces_Modeles WHERE id_piece=?", (id_p_edit,))
+                                        cursor_del.execute("DELETE FROM Pieces_Detachees WHERE id_piece=?", (id_p_edit,))
+                                        
+                                        conn_del.commit()
+                                        conn_del.close()
+                                        
+                                        st.success("Article et stocks associés supprimés avec succès !")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Impossible : cet article est encore lié à des Ordres de Réparation (OR) ou des factures d'achat.")
+                st.markdown("---")
+                with st.expander("📥 Import massif du Catalogue (via Excel)"):
+                    st.write("Importez rapidement votre référentiel complet de pièces avec leurs prix initiaux. Si une catégorie n'existe pas, elle sera créée automatiquement.")
+                    
+                    # 1. Modèle Excel enrichi avec le Prix Unitaire
+                    df_modele_cat = pd.DataFrame({
+                        "Référence Interne": ["FILTRE-HUILE-01", "COURROIE-X"],
+                        "Désignation": ["Filtre à huile moteur", "Courroie de distribution"],
+                        "Catégorie": ["MOTEUR", "TRANSMISSION"],
+                        "Modèle N° / OEM": ["OEM-123", ""],
+                        "Réf. Fournisseur": ["BOSCH-456", ""],
+                        "Seuil d'alerte": [5, 2],
+                        "Prix Unitaire": [15000, 25000]
+                    })
+                    
+                    st.download_button(
+                        label="⬇️ Télécharger le modèle Excel (Catalogue Pièces)",
+                        data=convertir_en_excel(df_modele_cat),
+                        file_name="Modele_Import_Catalogue.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                    
+                    # 2. Upload et traitement
+                    fichier_cat = st.file_uploader("Chargez votre fichier d'articles (.xlsx)", type=["xlsx"], key="import_cat")
+                    
+                    if fichier_cat is not None:
+                        if st.button("🚀 Lancer l'importation des articles", type="primary"):
+                            try:
+                                df_in_cat = pd.read_excel(fichier_cat)
+                                cols_req = ["Référence Interne", "Désignation", "Catégorie"]
+                                
+                                if not all(col in df_in_cat.columns for col in cols_req):
+                                    st.error(f"⚠️ Colonnes manquantes. Le fichier doit contenir au minimum : {', '.join(cols_req)}")
+                                else:
+                                    conn = sqlite3.connect("garage_agricole.db")
+                                    cursor = conn.cursor()
+                                    cursor.execute("PRAGMA foreign_keys = ON;")
+                                    
+                                    succes = 0
+                                    
+                                    for index, row in df_in_cat.iterrows():
+                                        ref = str(row['Référence Interne']).strip()
+                                        desig = str(row['Désignation']).strip()
+                                        nom_cat = str(row['Catégorie']).strip().upper()
+                                        
+                                        # Ignorer les lignes vides
+                                        if pd.isna(ref) or ref == 'nan' or pd.isna(desig) or desig == 'nan':
+                                            continue 
+                                            
+                                        # Gestion intelligente de la catégorie
+                                        cursor.execute("SELECT id_categorie FROM Categories_Pieces WHERE nom_categorie=?", (nom_cat,))
+                                        res_cat = cursor.fetchone()
+                                        if res_cat:
+                                            id_cat = res_cat[0]
+                                        else:
+                                            cursor.execute("INSERT INTO Categories_Pieces (nom_categorie) VALUES (?)", (nom_cat,))
+                                            id_cat = cursor.lastrowid
+                                            
+                                        # Nettoyage des champs optionnels
+                                        modele_oem = str(row.get('Modèle N° / OEM', ''))
+                                        if pd.isna(modele_oem) or modele_oem == 'nan': modele_oem = ''
+                                        
+                                        ref_fourn = str(row.get('Réf. Fournisseur', ''))
+                                        if pd.isna(ref_fourn) or ref_fourn == 'nan': ref_fourn = ''
+                                        
+                                        try: seuil = float(row.get("Seuil d'alerte", 0.0))
+                                        except: seuil = 0.0
+                                        if pd.isna(seuil): seuil = 0.0
+
+                                        # NOUVEAU : Récupération sécurisée du Prix Unitaire
+                                        try: prix_u = float(row.get("Prix Unitaire", 0.0))
+                                        except: prix_u = 0.0
+                                        if pd.isna(prix_u): prix_u = 0.0
+                                        
+                                        # Vérifier si l'article existe déjà
+                                        cursor.execute("SELECT id_piece FROM Pieces_Detachees WHERE reference_interne=?", (ref,))
+                                        res_piece = cursor.fetchone()
+                                        
+                                        if res_piece:
+                                            # Mise à jour avec le prix
+                                            cursor.execute("""
+                                                UPDATE Pieces_Detachees 
+                                                SET designation=?, id_categorie=?, modele_piece=?, reference_fournisseur=?, seuil_alerte_stock=?, prix_revient_moyen=?
+                                                WHERE id_piece=?
+                                            """, (desig, id_cat, modele_oem.strip(), ref_fourn.strip(), seuil, prix_u, res_piece[0]))
+                                        else:
+                                            # Création avec le prix
+                                            cursor.execute("""
+                                                INSERT INTO Pieces_Detachees (reference_interne, designation, id_categorie, modele_piece, reference_fournisseur, seuil_alerte_stock, prix_revient_moyen) 
+                                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                            """, (ref, desig, id_cat, modele_oem.strip(), ref_fourn.strip(), seuil, prix_u))
+                                            
+                                        succes += 1
+                                        
+                                    conn.commit()
+                                    conn.close()
+                                    
+                                    st.success(f"✅ Importation réussie : {succes} article(s) mis à jour ou créés avec leurs prix !")
+                                    st.rerun()
+                                    
+                            except Exception as e:
+                                st.error(f"Erreur lors de la lecture du fichier : {e}")
+                                        
 
         with tab_compat:
             st.subheader("Lier une pièce à un engin")
@@ -1619,9 +2496,19 @@ else:
     # --------------------------------------------------------------------------
     # 5. PARC ÉQUIPEMENTS
     # --------------------------------------------------------------------------
+    # --------------------------------------------------------------------------
+    # 5. PARC ÉQUIPEMENTS
+    # --------------------------------------------------------------------------
     elif choix_menu == "🏭 Parc Équipements":
-        st.title("🏭 Gestion du Parc & Équipements")
-        tab_vehicule, tab_marque, tab_modele, tab_preventif = st.tabs(["1. Liste des Équipements", "2. Marques", "3. Modèles / Types", "4. Plan d'Entretien"])
+        st.title("🚜 Gestion du Parc & Équipements")
+        
+        tab_vehicule, tab_historique, tab_marque, tab_modele, tab_preventif = st.tabs([
+            "📋 1. Équipements", 
+            "📊 2. Carnet de Santé", 
+            "🏷️ 3. Marques", 
+            "🧩 4. Modèles", 
+            "📅 5. Préventif"
+        ])
         
         with tab_vehicule:
             df_modeles_base = lire_donnees("SELECT mod.id_modele, m.nom_marque || ' ' || mod.nom_modele AS desc_modele FROM Modeles mod JOIN Marques m ON mod.id_marque = m.id_marque")
@@ -1815,6 +2702,137 @@ else:
             else:
                 st.warning("⚠️ Veuillez d'abord créer des modèles d'engins.")
 
+        with tab_historique:
+            st.subheader("📊 Carnet de Santé & Rentabilité par Équipement")
+            
+            df_vehicules_hist = lire_donnees("""
+                SELECT v.id_vehicule, 
+                       IFNULL(v.immatriculation, '') || ' - ' || IFNULL(m.nom_marque, '') || ' ' || IFNULL(mod.nom_modele, '') AS nom_eq 
+                FROM Vehicules v
+                LEFT JOIN Modeles mod ON v.id_modele = mod.id_modele
+                LEFT JOIN Marques m ON mod.id_marque = m.id_marque
+            """)
+            
+            if not df_vehicules_hist.empty:
+                # Ajout de l'option "Tous les équipements"
+                dict_vehicules_hist = dict(zip(df_vehicules_hist['nom_eq'], df_vehicules_hist['id_vehicule']))
+                liste_choix_eq = ["🌐 Tous les équipements"] + list(dict_vehicules_hist.keys())
+                
+                equipement_sel = st.selectbox("Sélectionnez un véhicule / équipement pour l'analyse :", liste_choix_eq)
+                
+                # Construction dynamique de la requête selon le choix
+                if equipement_sel == "🌐 Tous les équipements":
+                    query_hist = """
+                        SELECT 
+                            o.numero_or AS [N° DI],
+                            IFNULL(o.numero_or_final, '-') AS [N° OR],
+                            o.type_intervention AS [Type],
+                            IFNULL(o.date_entree_atelier, o.date_ouverture) AS [Entrée Atelier],
+                            o.date_cloture AS [Sortie Atelier],
+                            IFNULL(o.heures_mo, 0) AS [Heures MO],
+                            IFNULL(o.taux_horaire_mo, 0) AS [Taux MO],
+                            IFNULL(o.frais_externes, 0) AS [Frais],
+                            IFNULL(SUM(l.quantite_utilisee * p.prix_revient_moyen), 0) AS [Coût Pièces]
+                        FROM Ordres_Reparation o
+                        LEFT JOIN Lignes_OR_Pieces l ON o.id_or = l.id_or
+                        LEFT JOIN Pieces_Detachees p ON l.id_piece = p.id_piece
+                        WHERE o.statut = 'Terminé'
+                        GROUP BY o.id_or
+                        ORDER BY o.date_cloture DESC
+                    """
+                    df_historique = lire_donnees(query_hist)
+                else:
+                    id_v_sel = dict_vehicules_hist[equipement_sel]
+                    query_hist = """
+                        SELECT 
+                            o.numero_or AS [N° DI],
+                            IFNULL(o.numero_or_final, '-') AS [N° OR],
+                            o.type_intervention AS [Type],
+                            IFNULL(o.date_entree_atelier, o.date_ouverture) AS [Entrée Atelier],
+                            o.date_cloture AS [Sortie Atelier],
+                            IFNULL(o.heures_mo, 0) AS [Heures MO],
+                            IFNULL(o.taux_horaire_mo, 0) AS [Taux MO],
+                            IFNULL(o.frais_externes, 0) AS [Frais],
+                            IFNULL(SUM(l.quantite_utilisee * p.prix_revient_moyen), 0) AS [Coût Pièces]
+                        FROM Ordres_Reparation o
+                        LEFT JOIN Lignes_OR_Pieces l ON o.id_or = l.id_or
+                        LEFT JOIN Pieces_Detachees p ON l.id_piece = p.id_piece
+                        WHERE o.id_vehicule = ? AND o.statut = 'Terminé'
+                        GROUP BY o.id_or
+                        ORDER BY o.date_cloture DESC
+                    """
+                    df_historique = lire_donnees(query_hist, (id_v_sel,))
+                
+                if not df_historique.empty:
+                    df_historique['Coût MO'] = df_historique['Heures MO'] * df_historique['Taux MO']
+                    df_historique['Coût Total OR'] = df_historique['Coût MO'] + df_historique['Frais'] + df_historique['Coût Pièces']
+                    
+                    df_historique['Entrée Atelier'] = pd.to_datetime(df_historique['Entrée Atelier'])
+                    df_historique['Sortie Atelier'] = pd.to_datetime(df_historique['Sortie Atelier'])
+                    
+                    df_historique['Secondes Arrêt'] = (df_historique['Sortie Atelier'] - df_historique['Entrée Atelier']).dt.total_seconds()
+                    df_historique['Secondes Arrêt'] = df_historique['Secondes Arrêt'].apply(lambda x: max(x, 0))
+                    
+                    def formater_duree_hm(secondes):
+                        if secondes <= 0:
+                            return "0 min"
+                        total_minutes = int(secondes // 60)
+                        heures = total_minutes // 60
+                        minutes = total_minutes % 60
+                        
+                        parties = []
+                        if heures > 0:
+                            parties.append(f"{heures}h")
+                        if minutes > 0 or heures == 0:
+                            parties.append(f"{minutes}min")
+                        return " ".join(parties)
+
+                    df_historique['Temps Arrêt'] = df_historique['Secondes Arrêt'].apply(formater_duree_hm)
+                    
+                    total_secondes_arret = df_historique['Secondes Arrêt'].sum()
+                    total_minutes_arret = int(total_secondes_arret // 60)
+                    total_heures_cumulees = total_minutes_arret // 60
+                    reste_minutes = total_minutes_arret % 60
+                    
+                    texte_temps_total = f"{total_heures_cumulees}h {reste_minutes}min"
+
+                    st.markdown("---")
+                    col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+                    
+                    symbole = st.session_state.get('config', {}).get("symbole_monnaie", "FCFA")
+                    
+                    with col_kpi1:
+                        st.metric("🔧 Interventions", len(df_historique))
+                    with col_kpi2:
+                        st.metric("⏱️ Temps d'arrêt total", texte_temps_total)
+                    with col_kpi3:
+                        st.metric("🔩 Total Coût Pièces", f"{formater_montant(df_historique['Coût Pièces'].sum())} {symbole}")
+                    with col_kpi4:
+                        total_global = df_historique['Coût Total OR'].sum()
+                        st.metric("💰 Coût de Revient Total", f"{formater_montant(total_global)} {symbole}")
+                        
+                    df_affichage = df_historique.copy()
+                    df_affichage['Entrée Atelier'] = df_affichage['Entrée Atelier'].dt.strftime('%Y-%m-%d %H:%M')
+                    df_affichage['Sortie Atelier'] = df_affichage['Sortie Atelier'].dt.strftime('%Y-%m-%d %H:%M')
+                    
+                    st.markdown("---")
+                    st.markdown("### 📋 Détail des interventions clôturées")
+                    
+                    colonnes_visibles = ['N° DI', 'N° OR', 'Type', 'Entrée Atelier', 'Sortie Atelier', 'Temps Arrêt', 'Coût MO', 'Frais', 'Coût Pièces', 'Coût Total OR']
+                    st.dataframe(df_affichage[colonnes_visibles], use_container_width=True, hide_index=True)
+                    
+                    st.download_button(
+                        label="📊 Exporter l'historique complet (Excel)",
+                        data=convertir_en_excel(df_affichage[colonnes_visibles]),
+                        file_name=f"Historique_{equipement_sel}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                else:
+                    st.info("Aucune intervention clôturée pour cet équipement.")
+            else:
+                st.warning("Aucun équipement enregistré dans la base.")
+
         with tab_marque:
             with st.form("form_m", clear_on_submit=True):
                 nm = st.text_input("Marque")
@@ -1962,37 +2980,59 @@ else:
                 nd = st.text_input("Nom du dépôt *")
                 if st.form_submit_button("Créer le dépôt"):
                     if nd.strip():
-                        try:
-                            executer_requete("INSERT INTO Depots (nom_depot) VALUES (?)", (nd.strip(),))
-                            st.success("Dépôt créé !")
+                        nom_depot_propre = nd.strip()
+                        # On vérifie d'abord si le dépôt existe déjà proprement
+                        df_exist = lire_donnees("SELECT id_depot FROM Depots WHERE LOWER(nom_depot) = ?", (nom_depot_propre.lower(),))
+                        
+                        if not df_exist.empty:
+                            st.error("⚠️ Ce dépôt existe déjà.")
+                        else:
+                            executer_requete("INSERT INTO Depots (nom_depot) VALUES (?)", (nom_depot_propre,))
+                            st.success(f"Dépôt '{nom_depot_propre}' créé avec succès !")
                             st.rerun()
-                        except: st.error("Ce dépôt existe déjà.")
-            st.dataframe(lire_donnees("SELECT id_depot AS ID, nom_depot AS Dépôt FROM Depots"), use_container_width=True, hide_index=True)
+                    else:
+                        st.error("Le nom du dépôt ne peut pas être vide.")
+            
+            st.dataframe(lire_donnees("SELECT id_depot AS ID, nom_depot AS Dépôt FROM Depots ORDER BY id_depot ASC"), use_container_width=True, hide_index=True)
 
             st.markdown("---")
             with st.expander("✏️ Modifier / 🗑️ Supprimer un Dépôt"):
-                df_dp = lire_donnees("SELECT id_depot, nom_depot FROM Depots")
+                df_dp = lire_donnees("SELECT id_depot, nom_depot FROM Depots ORDER BY id_depot ASC")
                 if not df_dp.empty:
-                    dict_dp = dict(zip(df_dp['nom_depot'], df_dp['id_depot']))
+                    df_dp['label_select'] = "ID " + df_dp['id_depot'].astype(str) + " : " + df_dp['nom_depot']
+                    dict_dp = dict(zip(df_dp['label_select'], df_dp['id_depot']))
+                    
                     dp_sel = st.selectbox("Dépôt :", list(dict_dp.keys()), key="edit_dp_sel")
                     id_dp_edit = dict_dp[dp_sel]
-                    new_dp_name = st.text_input("Nouveau nom du dépôt", value=dp_sel, key="up_dp_name")
                     
-                    cb1, cb2 = st.columns(2)
-                    with cb1:
-                        if st.button("💾 Mettre à jour le dépôt", type="primary", key="btn_up_dp"):
-                            try:
-                                executer_requete("UPDATE Depots SET nom_depot=? WHERE id_depot=?", (new_dp_name.strip(), id_dp_edit))
-                                st.success("Dépôt mis à jour !")
-                                st.rerun()
-                            except: st.error("Ce nom existe déjà.")
-                    with cb2:
-                        if st.button("🚨 Supprimer ce dépôt", key="btn_del_dp"):
+                    nom_actuel_dp = df_dp.loc[df_dp['id_depot'] == id_dp_edit, 'nom_depot'].values[0]
+                    
+                    # Formulaire isolé avec clé unique par ID pour éviter les confusions de champs
+                    with st.form(f"form_mod_del_depot_{id_dp_edit}"):
+                        new_dp_name = st.text_input("Nouveau nom du dépôt", value=nom_actuel_dp, key=f"up_dp_name_{id_dp_edit}")
+                        
+                        cb1, cb2 = st.columns(2)
+                        with cb1:
+                            btn_up_dp = st.form_submit_button("💾 Mettre à jour le dépôt", type="primary")
+                        with cb2:
+                            btn_del_dp = st.form_submit_button("🚨 Supprimer ce dépôt")
+                            
+                        if btn_up_dp:
+                            if new_dp_name.strip():
+                                try:
+                                    executer_requete("UPDATE Depots SET nom_depot=? WHERE id_depot=?", (new_dp_name.strip(), id_dp_edit))
+                                    st.success(f"Dépôt (ID {id_dp_edit}) mis à jour avec succès !")
+                                    st.rerun()
+                                except: st.error("Ce nom de dépôt existe déjà.")
+                            else:
+                                st.error("Le nom ne peut pas être vide.")
+                                
+                        if btn_del_dp:
                             try:
                                 executer_requete("DELETE FROM Depots WHERE id_depot=?", (id_dp_edit,))
-                                st.success("Dépôt supprimé.")
+                                st.success(f"Dépôt (ID {id_dp_edit}) supprimé avec succès !")
                                 st.rerun()
-                            except: st.error("Impossible : ce dépôt contient du stock.")
+                            except: st.error("Impossible : ce dépôt contient du stock ou est lié à des mouvements.")
 
         with tab_atelier:
             st.subheader("Gestion des Ateliers / Garages de l'entreprise")
@@ -2000,47 +3040,280 @@ else:
                 nouveau_atelier = st.text_input("Nom du nouvel atelier / garage *", placeholder="Ex: Atelier Froid, Atelier Électronique...")
                 if st.form_submit_button("➕ Ajouter l'atelier", type="primary"):
                     if nouveau_atelier.strip():
-                        try:
-                            executer_requete("INSERT INTO Ateliers (nom_atelier) VALUES (?)", (nouveau_atelier.strip(),))
-                            st.success(f"Atelier '{nouveau_atelier.strip()}' ajouté avec succès !")
-                            st.rerun()
-                        except sqlite3.IntegrityError:
-                            st.error("⚠️ Cet atelier existe déjà.")
+                        nom_propre = nouveau_atelier.strip()
+                        existants = lire_donnees("SELECT nom_atelier FROM Ateliers")
+                        noms_existants_lower = [str(x).lower() for x in existants['nom_atelier'].tolist()] if not existants.empty else []
+                        
+                        if nom_propre.lower() in noms_existants_lower:
+                            st.error(f"⚠️ Un atelier nommé '{nom_propre}' existe déjà !")
+                        else:
+                            try:
+                                executer_requete("INSERT INTO Ateliers (nom_atelier) VALUES (?)", (nom_propre,))
+                                st.success(f"Atelier '{nom_propre}' ajouté avec succès !")
+                                st.rerun()
+                            except sqlite3.IntegrityError:
+                                st.error("⚠️ Cet atelier existe déjà.")
                     else:
                         st.error("Le nom de l'atelier ne peut pas être vide.")
 
             st.markdown("---")
             st.subheader("📋 Liste des Ateliers Actuels")
-            df_ateliers_actuels = lire_donnees("SELECT id_atelier AS ID, nom_atelier AS Atelier FROM Ateliers")
+            df_ateliers_actuels = lire_donnees("SELECT id_atelier AS ID, nom_atelier AS Atelier FROM Ateliers ORDER BY id_atelier ASC")
             st.dataframe(df_ateliers_actuels, use_container_width=True, hide_index=True)
 
             if not df_ateliers_actuels.empty:
                 st.markdown("---")
                 with st.expander("✏️ Modifier / 🗑️ Supprimer un Atelier"):
-                    dict_ateliers_mod = dict(zip(df_ateliers_actuels['Atelier'], df_ateliers_actuels['ID']))
+                    # Affichage des ID dans le menu déroulant pour les distinguer clairement
+                    df_ateliers_actuels['label_select'] = "ID " + df_ateliers_actuels['ID'].astype(str) + " : " + df_ateliers_actuels['Atelier']
+                    dict_ateliers_mod = dict(zip(df_ateliers_actuels['label_select'], df_ateliers_actuels['ID']))
+                    
                     atelier_a_modifier = st.selectbox("Sélectionnez l'atelier :", list(dict_ateliers_mod.keys()), key="edit_at_sel")
                     id_at_edit = dict_ateliers_mod[atelier_a_modifier]
                     
-                    new_atelier_name = st.text_input("Nouveau nom de l'atelier", value=atelier_a_modifier, key="up_at_name")
+                    nom_actuel = df_ateliers_actuels.loc[df_ateliers_actuels['ID'] == id_at_edit, 'Atelier'].values[0]
                     
-                    c_at1, c_at2 = st.columns(2)
-                    with c_at1:
-                        if st.button("💾 Mettre à jour l'atelier", type="primary", key="btn_up_at"):
-                            try:
-                                executer_requete("UPDATE Ateliers SET nom_atelier = ? WHERE id_atelier = ?", (new_atelier_name.strip(), id_at_edit))
-                                st.success("Atelier mis à jour !")
-                                st.rerun()
-                            except: st.error("Erreur : Ce nom existe déjà.")
-                    with c_at2:
-                        if st.button("🚨 Supprimer cet atelier", key="btn_del_at"):
+                    # Formulaire isolé par ID pour éviter les conflits de rafraîchissement
+                    with st.form(f"form_mod_del_atelier_{id_at_edit}"):
+                        new_atelier_name = st.text_input("Nouveau nom de l'atelier", value=nom_actuel, key=f"up_at_name_{id_at_edit}")
+                        
+                        c_at1, c_at2 = st.columns(2)
+                        with c_at1:
+                            btn_update = st.form_submit_button("💾 Mettre à jour l'atelier", type="primary")
+                        with c_at2:
+                            btn_delete = st.form_submit_button("🚨 Supprimer cet atelier")
+                            
+                        if btn_update:
+                            if new_atelier_name.strip():
+                                try:
+                                    executer_requete("UPDATE Ateliers SET nom_atelier = ? WHERE id_atelier = ?", (new_atelier_name.strip(), id_at_edit))
+                                    st.success(f"Atelier (ID {id_at_edit}) mis à jour avec succès !")
+                                    st.rerun()
+                                except: 
+                                    st.error("Erreur : Ce nom d'atelier existe déjà.")
+                            else:
+                                st.error("Le nom ne peut pas être vide.")
+                                
+                        if btn_delete:
                             try:
                                 executer_requete("DELETE FROM Ateliers WHERE id_atelier = ?", (id_at_edit,))
-                                st.success("Atelier supprimé.")
+                                st.success(f"Atelier (ID {id_at_edit}) supprimé avec succès !")
                                 st.rerun()
-                            except: st.error("Erreur lors de la suppression.")
+                            except: 
+                                st.error("Impossible de supprimer cet atelier (il est lié à des interventions).")
 
         with tab_outil:
-            st.info("Module Outillage actif.")
+            st.subheader("🛠️ Gestion du Cycle de l'Outillage (Dépôts, Ateliers & Réformes)")
+            
+            sub_t1, sub_t2, sub_t3 = st.tabs(["1. Entrée / Achat Outils", "2. Affectation Ateliers", "3. Déclaration Casse / Perte & Historique"])
+
+            with sub_t1:
+                st.subheader("📥 Enregistrer l'entrée d'un nouvel outil en stock")
+                df_depots_o = lire_donnees("SELECT id_depot, nom_depot FROM Depots")
+                
+                if not df_depots_o.empty:
+                    with st.form("form_entree_outil", clear_on_submit=True):
+                        co1, co2 = st.columns(2)
+                        with co1:
+                            ref_o = st.text_input("Référence / Code Outil *", placeholder="EX: OUT-CLE-01")
+                            desig_o = st.text_input("Désignation de l'outil *", placeholder="EX: Clé mixte de 19")
+                        with co2:
+                            dict_dep = dict(zip(df_depots_o['nom_depot'], df_depots_o['id_depot']))
+                            choix_dep_entree = st.selectbox("Dépôt de stockage initial *", list(dict_dep.keys()))
+                            
+                        if st.form_submit_button("➕ Enregistrer l'outil en stock", type="primary"):
+                            if ref_o.strip() and desig_o.strip():
+                                try:
+                                    date_acq = datetime.now().strftime("%Y-%m-%d")
+                                    id_dep_dest = dict_dep[choix_dep_entree]
+                                    
+                                    id_nouveau_outil = executer_requete(
+                                        "INSERT INTO Outillage (reference_outil, designation, id_depot_actuel, atelier_affectation, statut, date_acquisition) VALUES (?, ?, ?, ?, 'En stock', ?)",
+                                        (ref_o.strip().upper(), desig_o.strip(), id_dep_dest, "Stock Dépôt", date_acq)
+                                    )
+                                    
+                                    executer_requete(
+                                        "INSERT INTO Historique_Outillage (id_outil, type_mouvement, motif, date_mouvement, responsable) VALUES (?, 'ENTREE', 'Achat / Dotation initiale', ?, ?)",
+                                        (id_nouveau_outil, datetime.now().strftime("%Y-%m-%d %H:%M"), st.session_state.get('nom_complet', 'Admin'))
+                                    )
+                                    
+                                    st.success(f"Outil '{desig_o.strip()}' enregistré avec succès dans {choix_dep_entree} !")
+                                    st.rerun()
+                                except sqlite3.IntegrityError:
+                                    st.error("⚠️ Cette référence d'outil existe déjà.")
+                            else:
+                                st.error("La référence et la désignation sont obligatoires.")
+                else:
+                    st.warning("⚠️ Veuillez d'abord créer au moins un dépôt dans l'onglet 'Dépôts'.")
+
+                st.markdown("---")
+                st.subheader("📦 Inventaire Global & Filtres")
+                
+                # On utilise un LEFT JOIN pour récupérer même les outils qui ne sont plus dans un dépôt
+                df_tous_outils = lire_donnees("""
+                    SELECT o.id_outil AS ID, o.reference_outil AS [Référence], o.designation AS [Désignation], 
+                           IFNULL(d.nom_depot, IFNULL(o.atelier_affectation, 'Hors Parc')) AS [Localisation], 
+                           o.statut AS [Statut],
+                           o.date_acquisition AS [Date Achat],
+                           IFNULL(o.fournisseur_origine, '-') AS [Fournisseur],
+                           IFNULL(o.facture_origine, '-') AS [N° Facture / BL]
+                    FROM Outillage o
+                    LEFT JOIN Depots d ON o.id_depot_actuel = d.id_depot
+                    ORDER BY o.id_outil DESC
+                """)
+                
+                if not df_tous_outils.empty:
+                    # 1. Création des filtres dynamiques (Façon Image 3)
+                    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+                    with col_f1:
+                        # On met "En stock" par défaut pour garder la logique du dépôt
+                        f_statut = st.selectbox("Statut :", ["Tous", "En stock", "En service", "Sortie"], index=1) 
+                    with col_f2:
+                        liste_desig = ["Toutes"] + df_tous_outils['Désignation'].unique().tolist()
+                        f_desig = st.selectbox("Désignation :", liste_desig)
+                    with col_f3:
+                        liste_fourn = ["Tous"] + df_tous_outils['Fournisseur'].unique().tolist()
+                        f_fourn = st.selectbox("Fournisseur :", liste_fourn)
+                    with col_f4:
+                        liste_bl = ["Toutes"] + df_tous_outils['N° Facture / BL'].unique().tolist()
+                        f_bl = st.selectbox("N° Facture / BL :", liste_bl)
+                        
+                    # 2. Application des filtres sur les données
+                    df_filtre = df_tous_outils.copy()
+                    if f_statut != "Tous":
+                        if f_statut == "Sortie":
+                            df_filtre = df_filtre[df_filtre['Statut'].str.contains("Sortie")]
+                        else:
+                            df_filtre = df_filtre[df_filtre['Statut'] == f_statut]
+                            
+                    if f_desig != "Toutes": 
+                        df_filtre = df_filtre[df_filtre['Désignation'] == f_desig]
+                    if f_fourn != "Tous": 
+                        df_filtre = df_filtre[df_filtre['Fournisseur'] == f_fourn]
+                    if f_bl != "Toutes": 
+                        df_filtre = df_filtre[df_filtre['N° Facture / BL'] == f_bl]
+                    
+                    # 3. Affichage du tableau filtré
+                    st.dataframe(df_filtre.drop(columns=['ID']), use_container_width=True, hide_index=True)
+                    
+                    st.markdown("---")
+                    with st.expander("🗑️ Supprimer un outil du stock (Annulation / Doublon)"):
+                        # Le menu de suppression se base sur le tableau filtré pour faciliter la recherche
+                        if not df_filtre.empty:
+                            dict_del_outil = dict(zip(df_filtre['Référence'] + " - " + df_filtre['Désignation'], df_filtre['ID']))
+                            outil_a_supprimer = st.selectbox("Sélectionnez l'outil à supprimer définitivement :", list(dict_del_outil.keys()))
+                            
+                            if st.button("🚨 Supprimer définitivement cet outil", type="primary"):
+                                id_o_del = dict_del_outil[outil_a_supprimer]
+                                conn = sqlite3.connect("garage_agricole.db")
+                                cursor = conn.cursor()
+                                cursor.execute("DELETE FROM Historique_Outillage WHERE id_outil=?", (id_o_del,))
+                                cursor.execute("DELETE FROM Outillage WHERE id_outil=?", (id_o_del,))
+                                conn.commit()
+                                conn.close()
+                                st.success("✅ Outil supprimé définitivement du parc !")
+                                st.rerun()
+                        else:
+                            st.info("Aucun outil à supprimer avec ces filtres.")
+                else:
+                    st.info("Aucun outil enregistré dans la base de données.")
+
+            with sub_t2:
+                st.subheader("🔄 Transférer / Affecter un outil du dépôt vers un atelier")
+                df_dispo = lire_donnees("""
+                    SELECT o.id_outil, o.reference_outil || ' - ' || o.designation || ' (Dépôt : ' || d.nom_depot || ')' AS desc_o
+                    FROM Outillage o
+                    JOIN Depots d ON o.id_depot_actuel = d.id_depot
+                    WHERE o.statut = 'En stock'
+                """)
+                df_ateliers_aff = lire_donnees("SELECT nom_atelier FROM Ateliers")
+                
+                if not df_dispo.empty and not df_ateliers_aff.empty:
+                    with st.form("form_affecter_outil", clear_on_submit=True):
+                        dict_dispo = dict(zip(df_dispo['desc_o'], df_dispo['id_outil']))
+                        chx_outil_aff = st.selectbox("Sélectionnez l'outil à affecter :", list(dict_dispo.keys()))
+                        liste_at_dest = df_ateliers_aff['nom_atelier'].tolist()
+                        chx_atelier_dest = st.selectbox("Atelier de destination :", liste_at_dest)
+                        
+                        if st.form_submit_button("🚀 Valider le transfert vers l'atelier", type="primary"):
+                            id_o_sel = dict_dispo[chx_outil_aff]
+                            
+                            executer_requete(
+                                "UPDATE Outillage SET id_depot_actuel = NULL, atelier_affectation = ?, statut = 'En service' WHERE id_outil = ?",
+                                (chx_atelier_dest, id_o_sel)
+                            )
+                            executer_requete(
+                                "INSERT INTO Historique_Outillage (id_outil, type_mouvement, motif, date_mouvement, responsable) VALUES (?, 'AFFECTATION', ?, ?, ?)",
+                                (id_o_sel, f"Transféré vers {chx_atelier_dest}", datetime.now().strftime("%Y-%m-%d %H:%M"), st.session_state.get('nom_complet', 'Admin'))
+                            )
+                            st.success(f"Outil transféré avec succès vers l'atelier : {chx_atelier_dest} !")
+                            st.rerun()
+                else:
+                    st.info("Aucun outil en stock disponible pour un transfert (ou aucun atelier configuré).")
+
+                st.markdown("---")
+                st.subheader("🛠️ Outils actuellement en service dans les ateliers")
+                df_en_service = lire_donnees("""
+                    SELECT id_outil AS ID, reference_outil AS [Référence], designation AS [Désignation], 
+                           atelier_affectation AS [Atelier Assigné], date_acquisition AS [Date Achat]
+                    FROM Outillage
+                    WHERE statut = 'En service'
+                    ORDER BY id_outil DESC
+                """)
+                if not df_en_service.empty:
+                    st.dataframe(df_en_service.drop(columns=['ID']), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Aucun outil en service dans les ateliers actuellement.")
+
+            with sub_t3:
+                st.subheader("🚨 Déclarer une Casse, une Perte ou un Vol")
+                df_actifs = lire_donnees("""
+                    SELECT id_outil, reference_outil || ' - ' || designation || ' (Localisation : ' || IFNULL(atelier_affectation, 'Dépôt') || ')' AS desc_actif
+                    FROM Outillage
+                    WHERE statut IN ('En stock', 'En service')
+                """)
+                
+                if not df_actifs.empty:
+                    with st.form("form_casse_perte", clear_on_submit=True):
+                        dict_actifs = dict(zip(df_actifs['desc_actif'], df_actifs['id_outil']))
+                        chx_o_casse = st.selectbox("Sélectionnez l'outil concerné :", list(dict_actifs.keys()))
+                        
+                        col_cp1, col_cp2 = st.columns(2)
+                        with col_cp1:
+                            type_sortie = st.selectbox("Type d'incident :", ["Casse / Bris", "Perte / Égarement", "Vol", "Usure irréparable"])
+                        with col_cp2:
+                            motif_detail = st.text_input("Commentaires / Précisions :", placeholder="Ex: Clé tordue lors du démontage roue...")
+                            
+                        if st.form_submit_button("⚠️ Valider la sortie (Mettre au rebut / Sortie de parc)", type="primary"):
+                            id_o_reb = dict_actifs[chx_o_casse]
+                            
+                            executer_requete(
+                                "UPDATE Outillage SET statut = ? WHERE id_outil = ?",
+                                (f"Sortie : {type_sortie}", id_o_reb)
+                            )
+                            executer_requete(
+                                "INSERT INTO Historique_Outillage (id_outil, type_mouvement, motif, date_mouvement, responsable) VALUES (?, 'SORTIE_EXCEPTIONNELLE', ?, ?, ?)",
+                                (id_o_reb, f"{type_sortie} - {motif_detail}", datetime.now().strftime("%Y-%m-%d %H:%M"), st.session_state.get('nom_complet', 'Admin'))
+                            )
+                            st.success("Outil déclaré cassé/perdu et sorti du parc actif.")
+                            st.rerun()
+                else:
+                    st.info("Aucun outil actif en service ou en stock.")
+
+                st.markdown("---")
+                st.subheader("📜 Historique complet des mouvements & réformes")
+                df_histo_outils = lire_donnees("""
+                    SELECT h.id_mouvement, o.reference_outil AS [Réf], o.designation AS [Désignation], 
+                           h.type_mouvement AS [Type Mouvement], h.motif AS [Motif / Détails], 
+                           h.date_mouvement AS [Date], h.responsable AS [Auteur]
+                    FROM Historique_Outillage h
+                    JOIN Outillage o ON h.id_outil = o.id_outil
+                    ORDER BY h.id_mouvement DESC
+                """)
+                if not df_histo_outils.empty:
+                    st.dataframe(df_histo_outils.drop(columns=['id_mouvement']), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Aucun historique de mouvement pour le moment.")
 
     # --------------------------------------------------------------------------
     # 7. CONFIGURATION & PARAMÈTRES
@@ -2156,3 +3429,87 @@ else:
         df_users['Rôle'] = df_users['niveau_acces'].apply(lambda n: "🌟 Super Admin" if n==10 else ("🛡️ Admin" if n==9 else "🔧 Mécanicien"))
         df_users['Statut'] = df_users['actif'].apply(lambda x: "✅ Actif" if x == 1 else "❌ Suspendu")
         st.dataframe(df_users[['nom_complet', 'login', 'Rôle', 'Statut']], use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        
+        # Utilisation d'un expander persistant pour la modification/suppression
+        with st.expander("✏️ Modifier ou 🗑️ Supprimer un utilisateur existant", expanded=True):
+            df_u_edit = lire_donnees("SELECT id_user, nom_complet || ' (' || login || ')' AS desc_u FROM Utilisateurs")
+            if not df_u_edit.empty:
+                dict_u_edit = dict(zip(df_u_edit['desc_u'], df_u_edit['id_user']))
+                
+                # Gestion de la conservation de l'index sélectionné dans la session
+                if 'selected_user_key' not in st.session_state:
+                    st.session_state['selected_user_key'] = list(dict_u_edit.keys())[0]
+                
+                choix_u_mod = st.selectbox("Sélectionnez l'utilisateur à modifier :", list(dict_u_edit.keys()), key="sel_user_mod")
+                id_u_selected = dict_u_edit[choix_u_mod]
+                
+                curr_u = lire_donnees("SELECT * FROM Utilisateurs WHERE id_user=?", (id_u_selected,)).iloc[0]
+                
+                est_super_admin_cible = (int(curr_u['niveau_acces']) >= 10 or curr_u['login'] == 'admin')
+                connecte_est_super_admin = (st.session_state.get('niveau_acces', 1) >= 10)
+
+                if est_super_admin_cible and not connecte_est_super_admin:
+                    st.warning("🔒 Seul un Super Administrateur peut modifier ou réinitialiser le mot de passe du compte Super Administrateur.")
+                else:
+                    with st.form(f"form_mod_user_{id_u_selected}"):
+                        c_mu1, c_mu2 = st.columns(2)
+                        with c_mu1:
+                            new_nom_u = st.text_input("Nom et Prénom", value=curr_u['nom_complet'])
+                            new_login_u = st.text_input("Identifiant", value=curr_u['login'])
+                        with c_mu2:
+                            current_niv = int(curr_u['niveau_acces'])
+                            roles_modif = ["Mécanicien / Standard (Niveau 1)", "Administrateur (Niveau 9)"]
+                            if connecte_est_super_admin:
+                                roles_modif.append("Super Administrateur (Niveau 10)")
+                                
+                            idx_r = 0
+                            if current_niv >= 10: idx_r = len(roles_modif) - 1
+                            elif current_niv == 9: idx_r = 1
+                            
+                            new_role_u = st.selectbox("Rôle", roles_modif, index=idx_r)
+                            
+                            statuts_u = ["Actif", "Suspendu"]
+                            idx_s = 0 if int(curr_u['actif']) == 1 else 1
+                            new_statut_u = st.selectbox("Statut", statuts_u, index=idx_s)
+                        
+                        st.markdown("##### 🔒 Mot de passe (laisser vide pour ne pas modifier)")
+                        new_pwd_u = st.text_input("Nouveau mot de passe", type="password", key=f"new_pwd_{id_u_selected}")
+                        
+                        cb_u1, cb_u2 = st.columns(2)
+                        with cb_u1:
+                            btn_up_u = st.form_submit_button("💾 Mettre à jour l'utilisateur", type="primary")
+                        with cb_u2:
+                            btn_del_u = st.form_submit_button("🚨 Supprimer cet utilisateur")
+                            
+                        if btn_up_u:
+                            if new_nom_u.strip() and new_login_u.strip():
+                                niv_new = 10 if "Super" in new_role_u else (9 if "Administrateur" in new_role_u else 1)
+                                actif_new = 1 if new_statut_u == "Actif" else 0
+                                
+                                if new_pwd_u.strip():
+                                    pwd_hashed = hash_password(new_pwd_u.strip())
+                                    executer_requete(
+                                        "UPDATE Utilisateurs SET nom_complet=?, login=?, mot_de_passe_hash=?, niveau_acces=?, actif=? WHERE id_user=?",
+                                        (new_nom_u.strip(), new_login_u.strip(), pwd_hashed, niv_new, actif_new, id_u_selected)
+                                    )
+                                else:
+                                    executer_requete(
+                                        "UPDATE Utilisateurs SET nom_complet=?, login=?, niveau_acces=?, actif=? WHERE id_user=?",
+                                        (new_nom_u.strip(), new_login_u.strip(), niv_new, actif_new, id_u_selected)
+                                    )
+                                st.success("Utilisateur mis à jour avec succès !")
+                                st.rerun()
+                            else:
+                                st.error("Le nom et l'identifiant sont obligatoires.")
+                                
+                        if btn_del_u:
+                            if curr_u['login'] == 'admin':
+                                st.error("Impossible de supprimer le compte Administrateur principal.")
+                            else:
+                                executer_requete("DELETE FROM Utilisateurs WHERE id_user=?", (id_u_selected,))
+                                st.success("Utilisateur supprimé avec succès !")
+                                st.rerun()
+            else:
+                st.info("Aucun utilisateur à modifier.")
