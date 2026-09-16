@@ -147,6 +147,40 @@ def migrer_base_de_donnees():
         FOREIGN KEY(id_depot_arrivee) REFERENCES Depots(id_depot)
     )''')
 
+
+    # Table des ateliers dynamique
+    cursor.execute('''CREATE TABLE IF NOT EXISTS Ateliers (
+        id_atelier INTEGER PRIMARY KEY AUTOINCREMENT,
+        nom_atelier TEXT UNIQUE NOT NULL,
+        id_chef_atelier INTEGER,
+        FOREIGN KEY(id_chef_atelier) REFERENCES Utilisateurs(id_user)
+    )''')
+    cursor.execute("INSERT OR IGNORE INTO Ateliers (nom_atelier) VALUES ('Atelier Principal'), ('Atelier Mécanique'), ('Atelier Électricité'), ('Atelier Carrosserie'), ('Sur site')")
+    
+    # Sécurité si la table existe déjà sans la colonne
+    cols_ateliers = [col[1] for col in cursor.execute("PRAGMA table_info(Ateliers)").fetchall()]
+    if "id_chef_atelier" not in cols_ateliers:
+        cursor.execute("ALTER TABLE Ateliers ADD COLUMN id_chef_atelier INTEGER")
+
+    # Table dédiée des Chefs d'Atelier
+    cursor.execute('''CREATE TABLE IF NOT EXISTS Chefs_Atelier (
+        id_chef INTEGER PRIMARY KEY AUTOINCREMENT,
+        nom_chef TEXT UNIQUE NOT NULL,
+        telephone TEXT,
+        specialite TEXT
+    )''')
+
+    # Mise à jour de la table Ateliers pour pointer vers cette nouvelle table
+    cursor.execute('''CREATE TABLE IF NOT EXISTS Ateliers (
+        id_atelier INTEGER PRIMARY KEY AUTOINCREMENT,
+        nom_atelier TEXT UNIQUE NOT NULL,
+        id_chef_atelier INTEGER,
+        FOREIGN KEY(id_chef_atelier) REFERENCES Chefs_Atelier(id_chef)
+    )''')
+    
+    cols_ateliers = [col[1] for col in cursor.execute("PRAGMA table_info(Ateliers)").fetchall()]
+    if "id_chef_atelier" not in cols_ateliers:
+        cursor.execute("ALTER TABLE Ateliers ADD COLUMN id_chef_atelier INTEGER")    
     
     conn.commit()
     conn.close()
@@ -269,12 +303,15 @@ def generer_pdf(id_or, format_impression):
                o.type_intervention, 
                o.description_panne, 
                o.atelier, 
-               u.nom_complet
+               u.nom_complet,
+               IFNULL(c.nom_chef, 'Non assigné') AS chef_atelier
         FROM Ordres_Reparation o
         JOIN Vehicules v ON o.id_vehicule = v.id_vehicule
         JOIN Modeles mod ON v.id_modele = mod.id_modele
         JOIN Marques m ON mod.id_marque = m.id_marque
         JOIN Utilisateurs u ON o.id_responsable = u.id_user
+        LEFT JOIN Ateliers a ON o.atelier = a.nom_atelier
+        LEFT JOIN Chefs_Atelier c ON a.id_chef_atelier = c.id_chef
         WHERE o.id_or = ?
     ''', (id_or,)).iloc[0]
 
@@ -364,6 +401,7 @@ def generer_pdf(id_or, format_impression):
         
     pdf.cell(largeur, 5, txt(f"Type : {infos['type_intervention']}"), ln=True)
     pdf.cell(largeur, 5, txt(f"Atelier : {infos['atelier']}"), ln=True)
+    pdf.cell(largeur, 5, txt(f"Chef d'Atelier : {infos['chef_atelier']}"), ln=True) # <-- AJOUT ICI
     pdf.cell(largeur, 5, txt(f"Responsable : {infos['nom_complet']}"), ln=True)
     
     cpt_val = float(infos.get('compteur_reception', 0))
@@ -416,7 +454,7 @@ def generer_pdf(id_or, format_impression):
     if rapport:
         pdf.ln(4)
         pdf.set_font("Arial", 'B', 10 if format_impression == "A4" else 8)
-        pdf.cell(largeur, 6, txt("OBSERVATIONS DU TECHNICIEN :"), ln=True)
+        pdf.cell(largeur, 6, txt("OBSERVATIONS DU RESPONSABLE :"), ln=True)
         pdf.set_font("Arial", '', 10 if format_impression == "A4" else 8)
         pdf.multi_cell(largeur, 5, txt(rapport))
         if float(infos.get('heures_mo', 0)) > 0:
@@ -424,8 +462,13 @@ def generer_pdf(id_or, format_impression):
 
     pdf.ln(12) 
     pdf.set_font("Arial", 'B', 10 if format_impression == "A4" else 8)
-    pdf.cell(largeur/2, 6, txt("Visa Chef Atelier"), align='C')
-    pdf.cell(largeur/2, 6, txt("Visa Technicien"), align='C', ln=True)
+    # On affiche le nom du chef d'atelier récupéré dynamiquement sous la ligne de visa
+    pdf.cell(largeur/2, 5, txt(f"Visa Chef Atelier"), align='C')
+    pdf.cell(largeur/2, 5, txt("Visa Responsable"), align='C', ln=True)
+    
+    pdf.set_font("Arial", '', 9 if format_impression == "A4" else 7)
+    pdf.cell(largeur/2, 5, txt(f"({infos['chef_atelier']})"), align='C')
+    pdf.cell(largeur/2, 5, txt(f"({infos['nom_complet']})"), align='C', ln=True)
 
     # Archivage automatique
     nom_format = "A4" if format_impression == "A4" else "Ticket"
@@ -677,7 +720,21 @@ else:
                     with col2:
                         st.text_input("Ancien compteur enregistré (Km/H)", value=formater_montant(ancien_cpt), disabled=True)
                         nouveau_compteur = st.number_input("Nouveau compteur à la réception (Km/H) *", min_value=ancien_cpt, value=ancien_cpt, step=1.0)
-                        choix_resp = st.selectbox("Responsable de l'intervention *", list(dict_users.keys()))
+                        # Récupération propre de l'utilisateur connecté dans la session
+                        nom_connecte_actuel = st.session_state.get('nom_complet', 'Super Administrateur')
+                        niveau_acces_actuel = int(st.session_state.get('niveau_acces', 1))
+
+                        # Si l'utilisateur a un niveau d'accès administrateur (9 ou 10)
+                        if niveau_acces_actuel >= 9 or nom_connecte_actuel == "Super Administrateur":
+                            choix_resp = st.selectbox("Responsable de l'intervention *", list(dict_users.keys()))
+                            id_resp = dict_users[choix_resp]
+                        else:
+                            # Pour un utilisateur standard (ex: patrick), le champ se verrouille sur son nom exact
+                            if nom_connecte_actuel not in dict_users:
+                                nom_connecte_actuel = list(dict_users.keys())[0]
+                                
+                            st.text_input("Responsable de l'intervention *", value=nom_connecte_actuel, disabled=True)
+                            id_resp = dict_users[nom_connecte_actuel]
                         
                     if st.form_submit_button("📝 Enregistrer la Demande", type="primary"):
                         if description.strip():
@@ -908,7 +965,7 @@ else:
                         type="primary"
                     )
             st.markdown("---")
-            with st.expander("✏️ Modifier / 🗑️ Supprimer une Intervention (DI / OR)"):
+            with st.expander("✏️ Modifier / 🗑️ Supprimer une Intervention (DI / OR) & Gérer les Pièces"):
                 if not df_filtre.empty:
                     # On réutilise le dictionnaire dict_print déjà créé pour l'impression
                     choix_edit_or = st.selectbox("Sélectionnez l'intervention à modifier ou supprimer :", list(dict_print.keys()), key="edit_or_sel")
@@ -967,6 +1024,105 @@ else:
                                 
                                 st.success("Intervention supprimée. Les pièces éventuellement engagées ont été remises en stock !")
                                 st.rerun()
+
+                    # -------------------------------------------------------------
+                    # GESTION DES PIÈCES POUR CET OR EN COURS (HORS DU FORMULAIRE PRINCIPAL)
+                    # -------------------------------------------------------------
+                    st.markdown("---")
+                    st.markdown("##### 🔧 Pièces détachées associées à cette intervention")
+                    
+                    df_pieces_deja = lire_donnees("""
+                        SELECT l.id_ligne_or AS id_ligne, p.reference_interne || ' - ' || p.designation AS [Article], 
+                               l.quantite_utilisee AS [Qté], p.prix_revient_moyen AS [PUMP], 
+                               (l.quantite_utilisee * p.prix_revient_moyen) AS [Total Ligne]
+                        FROM Lignes_OR_Pieces l
+                        JOIN Pieces_Detachees p ON l.id_piece = p.id_piece
+                        WHERE l.id_or = ?
+                    """, (id_or_edit,))
+                    
+                    if not df_pieces_deja.empty:
+                        st.dataframe(df_pieces_deja.drop(columns=['id_ligne']), use_container_width=True, hide_index=True)
+                        
+                        dict_lignes_or = dict(zip(df_pieces_deja['Article'] + " (Qté: " + df_pieces_deja['Qté'].astype(str) + ")", df_pieces_deja['id_ligne']))
+                        col_ret1, col_ret2 = st.columns([2, 1])
+                        with col_ret1:
+                            ligne_a_suppr = st.selectbox("Sélectionnez la pièce à retirer :", list(dict_lignes_or.keys()), key=f"sel_sup_p_{id_or_edit}")
+                        with col_ret2:
+                            st.write("")
+                            if st.button("❌ Retirer cette pièce", key=f"btn_sup_p_{id_or_edit}"):
+                                id_l_suppr = dict_lignes_or[ligne_a_suppr]
+                                info_ligne = lire_donnees("SELECT id_piece, id_depot, quantite_utilisee FROM Lignes_OR_Pieces WHERE id_ligne_or=?", (id_l_suppr,)).iloc[0]
+                                id_p_rendu, id_d_rendu, qte_rendue = int(info_ligne['id_piece']), int(info_ligne['id_depot']), float(info_ligne['quantite_utilisee'])
+                                
+                                conn = sqlite3.connect("garage_agricole.db")
+                                cursor = conn.cursor()
+                                cursor.execute("PRAGMA foreign_keys = ON;")
+                                
+                                # Remettre la quantité dans le bon dépôt d'origine
+                                cursor.execute("""
+                                    UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible + ? 
+                                    WHERE id_piece = ? AND id_depot = ?
+                                """, (qte_rendue, id_p_rendu, id_d_rendu))
+                                
+                                cursor.execute("DELETE FROM Lignes_OR_Pieces WHERE id_ligne_or = ?", (id_l_suppr,))
+                                conn.commit()
+                                conn.close()
+                                
+                                st.success("Pièce retirée et réintégrée dans le stock !")
+                                st.rerun()
+                    else:
+                        st.info("Aucune pièce imputée pour l'instant sur cette intervention.")
+                        
+                    # Formulaire d'ajout de pièce rapide pour cet OR
+                    df_catalogue_p = lire_donnees("SELECT id_piece, reference_interne || ' - ' || designation AS desc_p FROM Pieces_Detachees")
+                    df_depots_catalogue = lire_donnees("SELECT id_depot, nom_depot FROM Depots")
+                    
+                    if not df_catalogue_p.empty and not df_depots_catalogue.empty:
+                        with st.form(f"form_ajout_piece_or_{id_or_edit}", clear_on_submit=True):
+                            st.markdown("###### ➕ Ajouter une pièce à cet OR :")
+                            cp_1, cp_2, cp_3 = st.columns(3)
+                            with cp_1:
+                                dict_cat_p = dict(zip(df_catalogue_p['desc_p'], df_catalogue_p['id_piece']))
+                                choix_p_or = st.selectbox("Pièce :", list(dict_cat_p.keys()))
+                            with cp_2:
+                                dict_dep_p = dict(zip(df_depots_catalogue['nom_depot'], df_depots_catalogue['id_depot']))
+                                choix_dep_or = st.selectbox("Magasin source :", list(dict_dep_p.keys()))
+                            with cp_3:
+                                qte_or = st.number_input("Quantité", min_value=0.1, value=1.0, step=1.0)
+                                
+                            if st.form_submit_button("🚀 Imputer la pièce", type="primary", use_container_width=True):
+                                id_p_choisi = dict_cat_p[choix_p_or]
+                                id_d_choisi = dict_dep_p[choix_dep_or]
+                                
+                                conn = sqlite3.connect("garage_agricole.db")
+                                cursor = conn.cursor()
+                                cursor.execute("PRAGMA foreign_keys = ON;")
+                                
+                                stk_verif = cursor.execute("""
+                                    SELECT quantite_disponible FROM Stock_Actuel WHERE id_piece = ? AND id_depot = ?
+                                """, (id_p_choisi, id_d_choisi)).fetchone()
+                                
+                                qte_stock_dispo = stk_verif[0] if stk_verif else 0.0
+                                
+                                if qte_stock_dispo < qte_or:
+                                    st.error(f"❌ Stock insuffisant ! Disponible : {qte_stock_dispo}")
+                                    conn.close()
+                                else:
+                                    cursor.execute("""
+                                        UPDATE Stock_Actuel SET quantite_disponible = quantite_disponible - ? 
+                                        WHERE id_piece = ? AND id_depot = ?
+                                    """, (qte_or, id_p_choisi, id_d_choisi))
+                                    
+                                    cursor.execute("""
+                                        INSERT INTO Lignes_OR_Pieces (id_or, id_piece, id_depot, quantite_utilisee)
+                                        VALUES (?, ?, ?, ?)
+                                    """, (id_or_edit, id_p_choisi, id_d_choisi, qte_or))
+                                    
+                                    conn.commit()
+                                    conn.close()
+                                    
+                                    st.success("✅ Pièce imputée avec succès !")
+                                    st.rerun()
                 else:
                     st.info("Aucune intervention à modifier.")
                     
@@ -1059,28 +1215,32 @@ else:
                             date_cloture = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             
                             try:
-                                # Utilisation de tes colonnes exactes
+                                # 1. Récupérer l'id_vehicule lié à cet OR
+                                df_veh_associe = lire_donnees("SELECT id_vehicule FROM Ordres_Reparation WHERE id_or = ?", (id_or_clot,))
+                                
+                                # 2. Clôture de l'OR dans la base
                                 executer_requete("""
                                     UPDATE Ordres_Reparation 
                                     SET statut='Terminé', date_cloture=?, heures_mo=?, taux_horaire_mo=?, frais_externes=?, rapport_cloture=?
                                     WHERE id_or=?
                                 """, (date_cloture, heures_mo, taux_horaire, frais, rapport, id_or_clot))
-                                st.success("✅ OR clôturé avec succès !")
+                                
+                                # 3. Remettre le véhicule Opérationnel
+                                if not df_veh_associe.empty and pd.notna(df_veh_associe.iloc[0, 0]):
+                                    id_veh_concerne = int(df_veh_associe.iloc[0, 0])
+                                    executer_requete("UPDATE Vehicules SET statut = 'Opérationnel' WHERE id_vehicule = ?", (id_veh_concerne,))
+                                    st.success(f"✅ OR clôturé ! Véhicule remis en État Opérationnel.")
+                                else:
+                                    st.warning("⚠️ OR clôturé, mais aucun véhicule n'était rattaché à cet OR.")
+                                
                                 st.rerun()
+                                
                             except Exception as e:
-                                # Sécurité : enregistre au moins les montants si la colonne rapport_cloture n'existe pas encore
-                                executer_requete("""
-                                    UPDATE Ordres_Reparation 
-                                    SET statut='Terminé', date_cloture=?, heures_mo=?, taux_horaire_mo=?, frais_externes=?
-                                    WHERE id_or=?
-                                """, (date_cloture, heures_mo, taux_horaire, frais, id_or_clot))
-                                st.success("✅ OR clôturé avec succès !")
-                                st.warning("💡 Pense à ajouter 'rapport_cloture TEXT' dans ta fonction de migration pour sauvegarder les textes !")
-                                st.rerun()
+                                st.error(f"⚠️ Erreur technique lors de la clôture : {e}")
                         else:
                             st.error("Le rapport de clôture est obligatoire.")
-            else:
-                st.info("Aucun Ordre de Réparation n'est actuellement en cours.")
+                    else:
+                        st.info("Aucun Ordre de Réparation n'est actuellement en cours.")
 
     # --------------------------------------------------------------------------
     # 3. ACHATS & FOURNISSEURS
@@ -2493,9 +2653,7 @@ else:
             else:
                 st.warning("⚠️ Veuillez d'abord créer des pièces détachées et des modèles d'engins.")
 
-    # --------------------------------------------------------------------------
-    # 5. PARC ÉQUIPEMENTS
-    # --------------------------------------------------------------------------
+    
     # --------------------------------------------------------------------------
     # 5. PARC ÉQUIPEMENTS
     # --------------------------------------------------------------------------
@@ -2721,6 +2879,7 @@ else:
                 equipement_sel = st.selectbox("Sélectionnez un véhicule / équipement pour l'analyse :", liste_choix_eq)
                 
                 # Construction dynamique de la requête selon le choix
+                # Construction dynamique de la requête selon le choix avec regroupement des pièces
                 if equipement_sel == "🌐 Tous les équipements":
                     query_hist = """
                         SELECT 
@@ -2732,7 +2891,8 @@ else:
                             IFNULL(o.heures_mo, 0) AS [Heures MO],
                             IFNULL(o.taux_horaire_mo, 0) AS [Taux MO],
                             IFNULL(o.frais_externes, 0) AS [Frais],
-                            IFNULL(SUM(l.quantite_utilisee * p.prix_revient_moyen), 0) AS [Coût Pièces]
+                            IFNULL(SUM(l.quantite_utilisee * p.prix_revient_moyen), 0) AS [Coût Pièces],
+                            IFNULL(GROUP_CONCAT(CAST(l.quantite_utilisee AS TEXT) || 'x ' || p.reference_interne || ' (' || p.designation || ')', ' / '), 'Aucune pièce') AS [Pièces Remplacées]
                         FROM Ordres_Reparation o
                         LEFT JOIN Lignes_OR_Pieces l ON o.id_or = l.id_or
                         LEFT JOIN Pieces_Detachees p ON l.id_piece = p.id_piece
@@ -2753,7 +2913,8 @@ else:
                             IFNULL(o.heures_mo, 0) AS [Heures MO],
                             IFNULL(o.taux_horaire_mo, 0) AS [Taux MO],
                             IFNULL(o.frais_externes, 0) AS [Frais],
-                            IFNULL(SUM(l.quantite_utilisee * p.prix_revient_moyen), 0) AS [Coût Pièces]
+                            IFNULL(SUM(l.quantite_utilisee * p.prix_revient_moyen), 0) AS [Coût Pièces],
+                            IFNULL(GROUP_CONCAT(CAST(l.quantite_utilisee AS TEXT) || 'x ' || p.reference_interne || ' (' || p.designation || ')', ' / '), 'Aucune pièce') AS [Pièces Remplacées]
                         FROM Ordres_Reparation o
                         LEFT JOIN Lignes_OR_Pieces l ON o.id_or = l.id_or
                         LEFT JOIN Pieces_Detachees p ON l.id_piece = p.id_piece
@@ -2818,16 +2979,86 @@ else:
                     st.markdown("---")
                     st.markdown("### 📋 Détail des interventions clôturées")
                     
-                    colonnes_visibles = ['N° DI', 'N° OR', 'Type', 'Entrée Atelier', 'Sortie Atelier', 'Temps Arrêt', 'Coût MO', 'Frais', 'Coût Pièces', 'Coût Total OR']
+                    colonnes_visibles = ['N° DI', 'N° OR', 'Type', 'Entrée Atelier', 'Sortie Atelier', 'Temps Arrêt', 'Pièces Remplacées', 'Coût MO', 'Frais', 'Coût Pièces', 'Coût Total OR']
                     st.dataframe(df_affichage[colonnes_visibles], use_container_width=True, hide_index=True)
                     
-                    st.download_button(
-                        label="📊 Exporter l'historique complet (Excel)",
-                        data=convertir_en_excel(df_affichage[colonnes_visibles]),
-                        file_name=f"Historique_{equipement_sel}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
+                    st.markdown("---")
+                    
+                    # On crée 2 colonnes pour les boutons d'export
+                    col_dl1, col_dl2 = st.columns(2)
+                    
+                    with col_dl1:
+                        st.download_button(
+                            label="📊 Exporter l'historique complet (Excel)",
+                            data=convertir_en_excel(df_affichage[colonnes_visibles]),
+                            file_name=f"Historique_{equipement_sel}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                        
+                    with col_dl2:
+                        def generer_pdf_carnet_sante(df, nom_eq):
+                            def txt(texte):
+                                return str(texte).encode('latin-1', 'replace').decode('latin-1')
+
+                            pdf = FPDF(format='A4', orientation='L')
+                            pdf.set_auto_page_break(auto=True, margin=10)
+                            pdf.add_page()
+                            
+                            nom_eq_propre = txt(nom_eq).replace("?", "").strip()
+                            
+                            pdf.set_font("Arial", 'B', 12)
+                            pdf.cell(277, 8, txt(f"CARNET DE SANTE - {nom_eq_propre.upper()}"), ln=True, align='C')
+                            pdf.ln(4)
+                            
+                            # Ajustement des largeurs de colonnes pour donner plus d'espace aux pièces (Total = 277mm)
+                            headers = ['N° OR', 'Type', 'Sortie Atelier', 'Pièces Remplacées', 'Coût MO', 'Frais', 'Coût Pièces', 'Coût Total']
+                            widths = [30, 24, 30, 105, 22, 16, 25, 25]
+                            
+                            pdf.set_font("Arial", 'B', 8)
+                            for i, h in enumerate(headers):
+                                pdf.cell(widths[i], 6, txt(h), border=1, align='C')
+                            pdf.ln()
+                            
+                            pdf.set_font("Arial", '', 7)
+                            for _, row in df.iterrows():
+                                pieces_txt = txt(row['Pièces Remplacées'])
+                                # On n'enlève plus les points de suspension si c'est long, on affiche l'intégralité du texte
+                                
+                                pdf.cell(widths[0], 5, txt(row['N° OR']), border=1)
+                                pdf.cell(widths[1], 5, txt(row['Type']), border=1)
+                                pdf.cell(widths[2], 5, txt(str(row['Sortie Atelier'])[:16]), border=1)
+                                pdf.cell(widths[3], 5, pieces_txt, border=1) # Affiche toute la liste des pièces
+                                pdf.cell(widths[4], 5, txt(formater_montant(row['Coût MO'])), border=1, align='R')
+                                pdf.cell(widths[5], 5, txt(formater_montant(row['Frais'])), border=1, align='R')
+                                pdf.cell(widths[6], 5, txt(formater_montant(row['Coût Pièces'])), border=1, align='R')
+                                pdf.cell(widths[7], 5, txt(formater_montant(row['Coût Total OR'])), border=1, align='R')
+                                pdf.ln()
+                                
+                            # Calcul des totaux généraux
+                            tot_mo = df['Coût MO'].sum()
+                            tot_frais = df['Frais'].sum()
+                            tot_pieces = df['Coût Pièces'].sum()
+                            tot_general = df['Coût Total OR'].sum()
+                            
+                            pdf.set_font("Arial", 'B', 8)
+                            pdf.cell(widths[0] + widths[1] + widths[2] + widths[3], 6, txt("TOTAUX GÉRAUX"), border=1, align='R')
+                            pdf.cell(widths[4], 6, txt(formater_montant(tot_mo)), border=1, align='R')
+                            pdf.cell(widths[5], 6, txt(formater_montant(tot_frais)), border=1, align='R')
+                            pdf.cell(widths[6], 6, txt(formater_montant(tot_pieces)), border=1, align='R')
+                            pdf.cell(widths[7], 6, txt(formater_montant(tot_general)), border=1, align='R')
+                            pdf.ln()
+                                
+                            return pdf.output(dest='S').encode('latin1')
+
+                        pdf_bytes_sante = generer_pdf_carnet_sante(df_affichage, equipement_sel)
+                        st.download_button(
+                            label="📄 Exporter l'historique complet (PDF)",
+                            data=pdf_bytes_sante,
+                            file_name=f"Carnet_Sante.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
                 else:
                     st.info("Aucune intervention clôturée pour cet équipement.")
             else:
@@ -3035,12 +3266,68 @@ else:
                             except: st.error("Impossible : ce dépôt contient du stock ou est lié à des mouvements.")
 
         with tab_atelier:
-            st.subheader("Gestion des Ateliers / Garages de l'entreprise")
+            st.subheader("👨‍🔧 Gestion des Chefs d'Atelier")
+            
+            # Formulaire de création d'un Chef d'Atelier
+            with st.form("form_creer_chef", clear_on_submit=True):
+                col_ch1, col_ch2, col_ch3 = st.columns(3)
+                with col_ch1:
+                    nom_nouveau_chef = st.text_input("Nom & Prénom du Chef *", placeholder="Ex: Moussa Diop")
+                with col_ch2:
+                    tel_chef = st.text_input("Téléphone", placeholder="Ex: +221 77...")
+                with col_ch3:
+                    specialite_chef = st.text_input("Spécialité / Rôle", placeholder="Ex: Mécanique lourde / Froid")
+                    
+                if st.form_submit_button("➕ Ajouter ce Chef d'Atelier", type="primary"):
+                    if nom_nouveau_chef.strip():
+                        try:
+                            executer_requete(
+                                "INSERT INTO Chefs_Atelier (nom_chef, telephone, specialite) VALUES (?, ?, ?)",
+                                (nom_nouveau_chef.strip(), tel_chef.strip(), specialite_chef.strip())
+                            )
+                            st.success(f"Chef d'atelier '{nom_nouveau_chef.strip()}' ajouté avec succès !")
+                            st.rerun()
+                        except sqlite3.IntegrityError:
+                            st.error("⚠️ Ce chef d'atelier existe déjà.")
+                    else:
+                        st.error("Le nom du chef d'atelier est obligatoire.")
+
+            # Affichage de la liste des chefs d'atelier existants
+            df_chefs_tous = lire_donnees("SELECT id_chef AS ID, nom_chef AS [Nom & Prénom], telephone AS [Téléphone], specialite AS [Spécialité] FROM Chefs_Atelier")
+            if not df_chefs_tous.empty:
+                with st.expander("📋 Voir / Gérer la liste des Chefs d'Atelier enregistrés"):
+                    st.dataframe(df_chefs_tous.drop(columns=['ID']), use_container_width=True, hide_index=True)
+                    
+                    # Option de suppression d'un chef
+                    dict_del_chef = dict(zip(df_chefs_tous['Nom & Prénom'], df_chefs_tous['ID']))
+                    chef_a_suppr = st.selectbox("Sélectionner un chef à supprimer :", list(dict_del_chef.keys()), key="sel_suppr_chef")
+                    if st.button("🚨 Supprimer ce chef d'atelier"):
+                        id_c_suppr = dict_del_chef[chef_a_suppr]
+                        executer_requete("UPDATE Ateliers SET id_chef_atelier = NULL WHERE id_chef_atelier = ?", (id_c_suppr,))
+                        executer_requete("DELETE FROM Chefs_Atelier WHERE id_chef = ?", (id_c_suppr,))
+                        st.success("Chef d'atelier supprimé avec succès !")
+                        st.rerun()
+
+            st.markdown("---")
+            st.subheader("🏢 Gestion des Ateliers / Garages & Attribution des Chefs")
+            
+            # Récupération des chefs pour les menus déroulants
+            df_chefs_list = lire_donnees("SELECT id_chef, nom_chef FROM Chefs_Atelier")
+            dict_chefs = dict(zip(df_chefs_list['nom_chef'], df_chefs_list['id_chef'])) if not df_chefs_list.empty else {}
+            liste_noms_chefs = ["-- Aucun --"] + list(dict_chefs.keys())
+
             with st.form("form_creer_atelier", clear_on_submit=True):
-                nouveau_atelier = st.text_input("Nom du nouvel atelier / garage *", placeholder="Ex: Atelier Froid, Atelier Électronique...")
+                c_at_1, c_at_2 = st.columns(2)
+                with c_at_1:
+                    nouveau_atelier = st.text_input("Nom du nouvel atelier / garage *", placeholder="Ex: Atelier Froid, Atelier Électronique...")
+                with c_at_2:
+                    chef_choisi_creation = st.selectbox("Chef d'Atelier responsable", liste_noms_chefs)
+                
                 if st.form_submit_button("➕ Ajouter l'atelier", type="primary"):
                     if nouveau_atelier.strip():
                         nom_propre = nouveau_atelier.strip()
+                        id_chef_val = dict_chefs.get(chef_choisi_creation, None) if chef_choisi_creation != "-- Aucun --" else None
+                        
                         existants = lire_donnees("SELECT nom_atelier FROM Ateliers")
                         noms_existants_lower = [str(x).lower() for x in existants['nom_atelier'].tolist()] if not existants.empty else []
                         
@@ -3048,7 +3335,7 @@ else:
                             st.error(f"⚠️ Un atelier nommé '{nom_propre}' existe déjà !")
                         else:
                             try:
-                                executer_requete("INSERT INTO Ateliers (nom_atelier) VALUES (?)", (nom_propre,))
+                                executer_requete("INSERT INTO Ateliers (nom_atelier, id_chef_atelier) VALUES (?, ?)", (nom_propre, id_chef_val))
                                 st.success(f"Atelier '{nom_propre}' ajouté avec succès !")
                                 st.rerun()
                             except sqlite3.IntegrityError:
@@ -3058,24 +3345,44 @@ else:
 
             st.markdown("---")
             st.subheader("📋 Liste des Ateliers Actuels")
-            df_ateliers_actuels = lire_donnees("SELECT id_atelier AS ID, nom_atelier AS Atelier FROM Ateliers ORDER BY id_atelier ASC")
-            st.dataframe(df_ateliers_actuels, use_container_width=True, hide_index=True)
+            
+            df_ateliers_actuels = lire_donnees("""
+                SELECT a.id_atelier AS ID, 
+                       a.nom_atelier AS Atelier, 
+                       IFNULL(c.nom_chef, '--- Non assigné ---') AS [Chef d'Atelier],
+                       a.id_chef_atelier
+                FROM Ateliers a
+                LEFT JOIN Chefs_Atelier c ON a.id_chef_atelier = c.id_chef
+                ORDER BY a.id_atelier ASC
+            """)
+            st.dataframe(df_ateliers_actuels[['ID', 'Atelier', "Chef d'Atelier"]], use_container_width=True, hide_index=True)
 
             if not df_ateliers_actuels.empty:
                 st.markdown("---")
                 with st.expander("✏️ Modifier / 🗑️ Supprimer un Atelier"):
-                    # Affichage des ID dans le menu déroulant pour les distinguer clairement
                     df_ateliers_actuels['label_select'] = "ID " + df_ateliers_actuels['ID'].astype(str) + " : " + df_ateliers_actuels['Atelier']
                     dict_ateliers_mod = dict(zip(df_ateliers_actuels['label_select'], df_ateliers_actuels['ID']))
                     
                     atelier_a_modifier = st.selectbox("Sélectionnez l'atelier :", list(dict_ateliers_mod.keys()), key="edit_at_sel")
                     id_at_edit = dict_ateliers_mod[atelier_a_modifier]
                     
-                    nom_actuel = df_ateliers_actuels.loc[df_ateliers_actuels['ID'] == id_at_edit, 'Atelier'].values[0]
+                    curr_at = df_ateliers_actuels.loc[df_ateliers_actuels['ID'] == id_at_edit].iloc[0]
+                    nom_actuel = curr_at['Atelier']
+                    id_chef_actuel = curr_at['id_chef_atelier']
                     
-                    # Formulaire isolé par ID pour éviter les conflits de rafraîchissement
+                    idx_chef_defaut = 0
+                    if pd.notna(id_chef_actuel):
+                        for idx, (nom_c, id_c) in enumerate(dict_chefs.items()):
+                            if id_c == int(id_chef_actuel):
+                                idx_chef_defaut = idx + 1
+                                break
+
                     with st.form(f"form_mod_del_atelier_{id_at_edit}"):
-                        new_atelier_name = st.text_input("Nouveau nom de l'atelier", value=nom_actuel, key=f"up_at_name_{id_at_edit}")
+                        c_mod_at1, c_mod_at2 = st.columns(2)
+                        with c_mod_at1:
+                            new_atelier_name = st.text_input("Nouveau nom de l'atelier", value=nom_actuel, key=f"up_at_name_{id_at_edit}")
+                        with c_mod_at2:
+                            new_chef_choisi = st.selectbox("Chef d'Atelier responsable", liste_noms_chefs, index=idx_chef_defaut, key=f"up_at_chef_{id_at_edit}")
                         
                         c_at1, c_at2 = st.columns(2)
                         with c_at1:
@@ -3084,23 +3391,27 @@ else:
                             btn_delete = st.form_submit_button("🚨 Supprimer cet atelier")
                             
                         if btn_update:
-                            if new_atelier_name.strip():
-                                try:
-                                    executer_requete("UPDATE Ateliers SET nom_atelier = ? WHERE id_atelier = ?", (new_atelier_name.strip(), id_at_edit))
-                                    st.success(f"Atelier (ID {id_at_edit}) mis à jour avec succès !")
-                                    st.rerun()
-                                except: 
-                                    st.error("Erreur : Ce nom d'atelier existe déjà.")
-                            else:
-                                st.error("Le nom ne peut pas être vide.")
+                            nom_propre = new_atelier_name.strip()
+                            if nom_propre:
+                                new_id_chef_val = dict_chefs.get(new_chef_choisi, None) if new_chef_choisi != "-- Aucun --" else None
                                 
-                        if btn_delete:
-                            try:
-                                executer_requete("DELETE FROM Ateliers WHERE id_atelier = ?", (id_at_edit,))
-                                st.success(f"Atelier (ID {id_at_edit}) supprimé avec succès !")
-                                st.rerun()
-                            except: 
-                                st.error("Impossible de supprimer cet atelier (il est lié à des interventions).")
+                                # Vérification si le nom existe déjà pour un AUTRE atelier
+                                double_check = lire_donnees(
+                                    "SELECT id_atelier FROM Ateliers WHERE LOWER(nom_atelier) = ? AND id_atelier != ?", 
+                                    (nom_propre.lower(), id_at_edit)
+                                )
+                                
+                                if not double_check.empty:
+                                    st.error("⚠️ Un autre atelier porte déjà ce nom !")
+                                else:
+                                    executer_requete(
+                                        "UPDATE Ateliers SET nom_atelier = ?, id_chef_atelier = ? WHERE id_atelier = ?", 
+                                        (nom_propre, new_id_chef_val, id_at_edit)
+                                    )
+                                    st.success(f"Atelier mis à jour avec succès !")
+                                    st.rerun()
+                            else:
+                                st.error("Le nom de l'atelier ne peut pas être vide.")
 
         with tab_outil:
             st.subheader("🛠️ Gestion du Cycle de l'Outillage (Dépôts, Ateliers & Réformes)")
